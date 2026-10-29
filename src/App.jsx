@@ -69,7 +69,7 @@ function Settings({bg,setBg,alpha,setAlpha,info,setInfo,menuOps,setMenuOps,setIm
   const fileInput=useRef(null);
   return <div className="page-inner">
     <div className="crumbs">Accueil / <strong>Paramètres</strong></div>
-    <div className="workspace-heading"><div><h1>Personnalisation</h1><p>Apparence et options du futur menu contextuel Windows</p></div></div>
+    <div className="workspace-heading"><div><h1>Personnalisation</h1><p>Apparence et commandes préparées pour Windows 11</p></div></div>
     <section className="setting-section"><h2>Apparence</h2>
       <div className="setting-row"><div><label htmlFor="bgSelector">Fond de l'interface</label><small>Choisir une ambiance propre à GEKKO ARCHIVE</small></div>
         <select id="bgSelector" value={bg} onChange={e=>setBg(e.target.value)}><option value="default">Bleu & cuivre</option><option value="amber">Or nocturne</option><option value="blue">Bleu profond</option><option value="custom">Image personnelle</option></select></div>
@@ -78,20 +78,21 @@ function Settings({bg,setBg,alpha,setAlpha,info,setInfo,menuOps,setMenuOps,setIm
         <input ref={fileInput} className="hidden" type="file" accept="image/*" onChange={e=>{if(e.target.files?.[0])setImage(e.target.files[0]);e.target.value='';}}/></div>
       <div className="setting-row"><div><label htmlFor="infoToggle">Panneau d'informations</label><small>Affiché sous le contenu d'une archive</small></div><input id="infoToggle" type="checkbox" checked={info} onChange={e=>setInfo(e.target.checked)}/></div>
     </section>
-    <section className="setting-section"><h2>Menu contextuel Windows 11</h2><p>Choix préparatoires : l'intégration à Windows sera développée ultérieurement.</p>
+    <section className="setting-section"><h2>Menu contextuel Windows 11</h2><p>Les choix sont désormais mémorisés. Le pont de lancement est testable ; le sous-menu natif Windows 11 n’est pas encore installé.</p>
       {menuLabels.map(([id,label])=><div className="setting-row" key={id}><label htmlFor={'menu_'+id}>{label}</label><input id={'menu_'+id} type="checkbox" checked={menuOps.includes(id)} onChange={e=>setMenuOps(current=>e.target.checked?[...current,id]:current.filter(x=>x!==id))}/></div>)}
     </section>
   </div>;
 }
-function CreationDialog({onClose,onCreated}) {
-  const [sources,setSources]=useState([]);
-  const [format,setFormat]=useState('7z');
-  const [destination,setDestination]=useState('');
+function CreationDialog({onClose,onCreated,initialSources=[],initialFormat='7z',initialError=''}) {
+  const leaf=path=>String(path||'').split(/[\\/]/).filter(Boolean).at(-1)||'Archive';
+  const [sources,setSources]=useState(()=>initialSources);
+  const [format,setFormat]=useState(()=>initialFormat);
+  const [destination,setDestination]=useState(()=>initialSources.length?suggestedOutput(initialSources,initialFormat):'');
   const [level,setLevel]=useState('5');
   const [password,setPassword]=useState('');
   const [passwordConfirm,setPasswordConfirm]=useState('');
   const [busy,setBusy]=useState(false);
-  const [error,setError]=useState('');
+  const [error,setError]=useState(initialError);
   const [progress,setProgress]=useState({phase:'',percent:0,message:''});
   const [result,setResult]=useState(null);
   const [cancelAsked,setCancelAsked]=useState(false);
@@ -100,7 +101,6 @@ function CreationDialog({onClose,onCreated}) {
       .then(fn=>{if(mounted)unlisten=fn;else fn();}).catch(()=>{});
     return ()=>{mounted=false;unlisten?.();};
   },[]);
-  const leaf=path=>String(path||'').split(/[\\/]/).filter(Boolean).at(-1)||'Archive';
   function suggestedOutput(paths,fmt){
     if(!paths.length)return '';
     const dir=archiveParentDirectory(paths[0]);
@@ -308,16 +308,16 @@ function ConversionDialog({archive,defaultPassword,onClose,onConverted}) {
   </section></div>;
 }
 
-function ExtractionDialog({archive,selected,onClose,onFinished,defaultPassword,initialDestination,autoStart=false}) {
+function ExtractionDialog({archive,selected,onClose,onFinished,defaultPassword,initialDestination,autoStart=false,initialPreview=null,initialError=''}) {
   const [destination,setDestination]=useState(()=>initialDestination||archiveParentDirectory(archive.path));
   const [password,setPassword]=useState(defaultPassword||'');
   const [policy,setPolicy]=useState('ask');
-  const [preview,setPreview]=useState(null);
-  const [decisions,setDecisions]=useState({});
+  const [preview,setPreview]=useState(initialPreview);
+  const [decisions,setDecisions]=useState(()=>initialPreview?.conflicts?Object.fromEntries(initialPreview.conflicts.map(k=>[k,'skip'])):{});
   const [working,setWorking]=useState(false);
   const [phase,setPhase]=useState({phase:'préparation',percent:0,message:''});
   const [result,setResult]=useState(null);
-  const [error,setError]=useState('');
+  const [error,setError]=useState(initialError);
   const [cancelAsked,setCancelAsked]=useState(false);
   useEffect(()=>{let unsub;let mounted=true;
     listen('gekko-extraction-progress',event=>{if(mounted)setPhase(event.payload);}).then(fn=>{if(mounted)unsub=fn;else fn();}).catch(()=>{});
@@ -412,7 +412,20 @@ export default function App(){
   const [bg,setBg]=useState('default');
   const [alpha,setAlpha]=useState('0.82');
   const [info,setInfo]=useState(true);
-  const [menuOps,setMenuOps]=useState(['zip','7z','extractHere','extractFolder','open']);
+  const [menuOps,setMenuOps]=useState(()=>{
+    const defaults=['zip','7z','extractHere','extractFolder','open'];
+    try {
+      const value=JSON.parse(localStorage.getItem('gekko.archive.context.commands')||'null');
+      return Array.isArray(value)?defaults.filter(id=>value.includes(id)):defaults;
+    } catch {return defaults;}
+  });
+  const [shellCreate,setShellCreate]=useState(null);
+  const [shellJob,setShellJob]=useState(null);
+  const shellBusy=useRef(false);
+  useEffect(()=>{
+    try{localStorage.setItem('gekko.archive.context.commands',JSON.stringify(menuOps));}
+    catch{ /* Les réglages visuels restent utilisables. */ }
+  },[menuOps]);
   const [customBg,setCustomBg]=useState('');
   const [extractOpen,setExtractOpen]=useState(false);
   const [createOpen,setCreateOpen]=useState(false);
@@ -501,6 +514,114 @@ export default function App(){
     return ()=>{disposed=true;stop?.();};
   },[]);
 
+  // La progression des commandes Windows est visible sans clic de confirmation.
+  useEffect(()=>{
+    let mounted=true;const unlisteners=[];
+    for(const [event,kind] of [['gekko-compression-progress','compression'],['gekko-extraction-progress','extraction']]){
+      listen(event,payload=>{
+        if(!mounted)return;
+        setShellJob(previous=>previous?.kind===kind?{
+          ...previous,percent:payload.payload.percent||0,
+          message:payload.payload.message||previous.message
+        }:previous);
+      }).then(stop=>{if(mounted)unlisteners.push(stop);else stop();}).catch(()=>{});
+    }
+    return ()=>{mounted=false;unlisteners.forEach(stop=>stop());};
+  },[]);
+  async function cancelShellJob(){
+    if(!shellJob||shellJob.cancelAsked)return;
+    setShellJob(previous=>previous?{...previous,cancelAsked:true,message:'Annulation demandée…'}:null);
+    try{await invoke(shellJob.kind==='compression'?'cancel_compression':'cancel_extraction');}
+    catch(e){setError('Impossible de demander l’annulation : '+String(e));}
+  }
+  function suggestedShellOutput(paths,format){
+    const path=String(paths[0]||'');
+    const leaf=path.split(/[\\/]/).filter(Boolean).at(-1)||'Archive';
+    const parent=archiveParentDirectory(path);
+    const stem=leaf.replace(/\.(7z|zip|rar|tar|gz|xz)$/i,'')||'Nouvelle_archive';
+    // Si le fichier source est déjà au format cible, évite son nom de sortie.
+    const base=stem+((leaf.toLowerCase()===stem+'.'+format)?'_compresse':'')+'.'+format;
+    return (parent.endsWith('\\')||parent.endsWith('/')?parent:parent+'\\')+base;
+  }
+  async function processShellCompression(action,paths){
+    setShellJob({kind:'compression',percent:0,message:'Préparation de la compression…',cancelAsked:false});
+    const destination=suggestedShellOutput(paths,action);
+    try {
+      const r=await invoke('create_archive',{req:{sourcePaths:paths,destination,format:action,level:5,password:null}});
+      notify('Archive '+action.toUpperCase()+' créée et vérifiée : '+r.path);
+    } catch(e) {
+      const message=String(e);
+      if(!message.toLowerCase().includes('annul')){
+        // Ne pas inventer de nouveau nom ni remplacer un fichier existant.
+        // La fenêtre d'édition n'apparaît que lorsque l'opération automatique échoue.
+        setShellCreate({sources:paths,format:action,error:message});
+        setCreateOpen(true);
+      } else notify('Compression annulée.');
+    } finally {setShellJob(null);}
+  }
+  async function processShellExtraction(action,archivePath){
+    const opened=await loadArchive(archivePath);
+    if(!opened)return; // Les archives chiffrées nécessitent parfois le mot de passe dès la lecture.
+    let destination=archiveParentDirectory(archivePath);
+    if(action==='extractFolder'){
+      try{destination=await invoke('ensure_shell_extract_folder',{archivePath});}
+      catch(e){setError('Impossible de préparer le dossier : '+String(e));setRoute('archive');return;}
+    }
+    const req={archivePath,destination,selectedPaths:[],password:null,policy:'ask',decisions:{}};
+    try {
+      const preview=await invoke('preview_extraction',{req});
+      if(preview.conflicts.length){
+        // La décision d'écraser ou ignorer doit rester explicite.
+        setExtractLaunch({destination,autoStart:false,preview});
+        setExtractOpen(true);
+        return;
+      }
+      setShellJob({kind:'extraction',percent:0,message:'Extraction automatique en cours…',cancelAsked:false});
+      const r=await invoke('extract_archive',{req});
+      notify('Extraction terminée : '+r.extracted+' fichier(s) vers '+r.destination);
+    } catch(e) {
+      const message=String(e);
+      if(!message.toLowerCase().includes('annul')){
+        // En cas de mot de passe manquant, afficher le formulaire habituel.
+        setExtractLaunch({destination,autoStart:false,error:message});
+        setExtractOpen(true);
+      } else notify('Extraction annulée.');
+    } finally {setShellJob(null);}
+  }
+  // Le .bat de test remet la commande à la fenêtre Tauri existante.
+  // Pas de nouvelle instance : une vérification légère de la file locale.
+  useEffect(()=>{
+    if(!window.__TAURI_INTERNALS__)return;
+    let active=true;
+    let inProgress=false;
+    async function receiveWindowsCommand(){
+      if(!active||inProgress)return;
+      inProgress=true;
+      try {
+        const request=await invoke('get_shell_launch');
+        if(!active||!request)return;
+        const {action,paths}=request;
+        // Une commande Windows se lance immédiatement avec les réglages habituels.
+        // La fenêtre classique ne s'affiche qu'en cas d'erreur ou de conflit.
+        if(shellBusy.current)return;
+        shellBusy.current=true;
+        try {
+          if(action==='zip'||action==='7z')await processShellCompression(action,paths);
+          else if(action==='open')await loadArchive(paths[0]);
+          else if(action==='extractHere'||action==='extractFolder')await processShellExtraction(action,paths[0]);
+        } finally {shellBusy.current=false;}
+      } catch(e){
+        if(active){
+          // Le message doit être visible même si l'application est sur l'accueil.
+          setError('Pont Windows indisponible : '+String(e));
+          setRoute('archive');
+        }
+      } finally {inProgress=false;}
+    }
+    receiveWindowsCommand();
+    const timer=setInterval(receiveWindowsCommand,900);
+    return ()=>{active=false;clearInterval(timer);};
+  },[]);
   useEffect(()=>()=>{if(popupTimer.current)clearTimeout(popupTimer.current);},[]);
   useEffect(()=>()=>{if(customBg)URL.revokeObjectURL(customBg);},[customBg]);
   function notify(text){setToast(text);clearTimeout(popupTimer.current);popupTimer.current=setTimeout(()=>setToast(''),4000);}
@@ -653,10 +774,11 @@ export default function App(){
         {route==='settings'&&<Settings {...{bg,setBg,alpha,setAlpha,info,setInfo,menuOps,setMenuOps,setImage}}/>}
       </main></section>
     </div>
-    {createOpen&&<CreationDialog onClose={()=>setCreateOpen(false)} onCreated={(r,openNow=false)=>{if(openNow)loadArchive(r.path);else notify('Archive créée et vérifiée.');}}/>}
+    {shellJob&&<div className="extract-overlay"><section className="extract-modal" role="dialog" aria-modal="true" aria-label="Opération Windows en cours"><div className="extract-header"><Icon name="archive"/><h2>{shellJob.kind==='compression'?'Compression automatique':'Extraction automatique'}</h2></div><div className="extract-progress" role="status"><div className="extract-progress-caption"><span>{shellJob.message}</span><strong>{shellJob.percent}%</strong></div><div className="extract-track"><div style={{width:`${shellJob.percent}%`}}/></div></div><div className="extract-footer"><button className="toolbtn" disabled={shellJob.cancelAsked} onClick={cancelShellJob}>{shellJob.cancelAsked?'Annulation demandée…':'Annuler'}</button></div></section></div>}
+    {createOpen&&<CreationDialog initialSources={shellCreate?.sources||[]} initialFormat={shellCreate?.format||'7z'} initialError={shellCreate?.error||''} onClose={()=>{setCreateOpen(false);setShellCreate(null);}} onCreated={(r,openNow=false)=>{if(openNow)loadArchive(r.path);else notify('Archive créée et vérifiée.');}}/>}
     {addOpen&&archive&&<AddDialog initialSources={droppedSources} archive={archive} defaultPassword={archivePassword} onClose={()=>{setAddOpen(false);setDroppedSources([]);}} onAdded={(_r,pass)=>{loadArchive(archive.path,pass);notify('Archive mise à jour et vérifiée.');}}/>}
     {convertOpen&&<ConversionDialog archive={archive} defaultPassword={archivePassword} onClose={()=>setConvertOpen(false)} onConverted={()=>notify('Archive convertie et vérifiée. Original conservé.')}/>}
-    {extractOpen&&archive&&<ExtractionDialog key={archive.path+'|'+(extractLaunch?.destination||'')} archive={archive} selected={selected} initialDestination={extractLaunch?.destination} autoStart={!!extractLaunch?.autoStart} defaultPassword={archivePassword} onClose={()=>{setExtractOpen(false);setExtractLaunch(null);}} onFinished={r=>notify(`${r.extracted} fichier(s) extrait(s).`)}/>}
+    {extractOpen&&archive&&<ExtractionDialog key={archive.path+'|'+(extractLaunch?.destination||'')} archive={archive} selected={selected} initialDestination={extractLaunch?.destination} autoStart={!!extractLaunch?.autoStart} initialPreview={extractLaunch?.preview||null} initialError={extractLaunch?.error||''} defaultPassword={archivePassword} onClose={()=>{setExtractOpen(false);setExtractLaunch(null);}} onFinished={r=>notify(`${r.extracted} fichier(s) extrait(s).`)}/>}
     {dropHint&&<div className="gekko-drop-indicator" aria-hidden="true">
       {dropHint==='extract'?'Relâche pour extraire dans le dossier de l’archive':dropHint==='add'?'Relâche pour ajouter les fichiers dans l’archive':dropHint==='destination'?'Relâche pour extraire dans ce dossier':'Relâche pour ouvrir cette archive'}
     </div>}

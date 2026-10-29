@@ -1,6 +1,6 @@
 [package]
 name = "gekko-archive"
-version = "0.4.3"
+version = "0.5.0"
 description = "GEKKO ARCHIVE — utilitaire local Windows 11"
 authors = ["GEKKO SOFTWARE"]
 edition = "2021"

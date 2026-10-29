@@ -971,7 +971,121 @@ async fn prepare_drag_export(
     Ok(result)
 }
 
+// Pont de test V0.5.0 : la fenêtre DEJA OUVERTE reçoit les actions
+// via un petit fichier de commande local. Aucune seconde instance Tauri.
+// Les arguments directs restent utilisables par une future extension native.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShellLaunch {action:String, paths:Vec<String>}
+
+fn validate_shell_launch(action:String, paths:Vec<String>)->Result<ShellLaunch,String>{
+    if !matches!(action.as_str(),"open"|"zip"|"7z"|"extractHere"|"extractFolder") {
+        return Err("Commande Windows non reconnue.".into());
+    }
+    if paths.is_empty()||paths.len()>256 {
+        return Err("La commande Windows doit contenir de 1 à 256 chemins.".into());
+    }
+    for item in &paths {
+        let path=Path::new(item);
+        if !path.is_absolute()||!path.exists()||(!path.is_file()&&!path.is_dir()) {
+            return Err(format!("Source Windows introuvable ou invalide : {item}"));
+        }
+    }
+    if !matches!(action.as_str(),"zip"|"7z") {
+        if paths.len()!=1||!Path::new(&paths[0]).is_file(){
+            return Err("Cette commande attend une seule archive.".into());
+        }
+    }
+    Ok(ShellLaunch{action,paths})
+}
+
+static SHELL_ARGS_CONSUMED:AtomicBool=AtomicBool::new(false);
+
+fn shell_argument_launch()->Result<Option<ShellLaunch>,String>{
+    // Une lecture unique : le frontend interroge régulièrement la file locale.
+    if SHELL_ARGS_CONSUMED.swap(true,Ordering::SeqCst){return Ok(None);}
+    let mut args=std::env::args_os().skip(1);
+    while let Some(arg)=args.next(){
+        if arg.to_string_lossy()=="--gekko-shell-action" {
+            let action=args.next().ok_or("Action Windows manquante.")?
+                .to_string_lossy().into_owned();
+            let paths:Vec<String>=args.take(257)
+                .map(|p|p.to_string_lossy().into_owned()).collect();
+            return validate_shell_launch(action,paths).map(Some);
+        }
+    }
+    Ok(None)
+}
+
+fn shell_queued_launch()->Result<Option<ShellLaunch>,String>{
+    let Some(appdata)=std::env::var_os("LOCALAPPDATA") else {return Ok(None)};
+    let folder=PathBuf::from(appdata).join("GEKKO_ARCHIVE").join("shell_bridge");
+    if !folder.is_dir(){return Ok(None);}
+    // Le script écrit d'abord un .tmp puis le renomme en .txt : pas de
+    // commande partiellement écrite et pas d'écrasement de commande.
+    let mut pending=Vec::new();
+    for entry in fs::read_dir(&folder).map_err(|e|format!("Pont Windows inaccessible : {e}"))? {
+        let entry=entry.map_err(|e|e.to_string())?;
+        let name=entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with("shell-command-")&&name.ends_with(".txt")&&entry.path().is_file(){
+            pending.push(entry.path());
+        }
+    }
+    pending.sort();
+    let Some(file)=pending.into_iter().next() else{return Ok(None)};
+    let size=fs::metadata(&file).map_err(|e|e.to_string())?.len();
+    if size>65536 {
+        let _=fs::remove_file(&file);
+        return Err("Commande Windows trop volumineuse (maximum 64 Ko).".into());
+    }
+    let content=fs::read_to_string(&file).map_err(|e|format!("Lecture du pont Windows : {e}"))?;
+    fs::remove_file(&file).map_err(|e|format!("Impossible de retirer la commande Windows : {e}"))?;
+    let mut lines=content.lines();
+    let action=lines.next().unwrap_or("").trim_end_matches('\r').to_string();
+    let paths:Vec<String>=lines.map(|line|line.trim_end_matches('\r').to_string()).collect();
+    validate_shell_launch(action,paths).map(Some)
+}
+
+#[tauri::command]
+fn get_shell_launch()->Result<Option<ShellLaunch>,String>{
+    if let Some(launch)=shell_argument_launch()? {return Ok(Some(launch));}
+    shell_queued_launch()
+}
+
+
+// Commande Windows : « Extraire vers un dossier » crée/réutilise un dossier du
+// nom de l'archive, à côté de celle-ci. N'accepte pas une destination arbitraire.
+#[tauri::command]
+fn ensure_shell_extract_folder(archive_path:String)->Result<String,String>{
+    let source=fs::canonicalize(&archive_path)
+        .map_err(|e|format!("Archive introuvable : {e}"))?;
+    if !source.is_file(){return Err("La source doit être une archive.".into());}
+    let filename=source.file_name().and_then(|v|v.to_str())
+        .ok_or("Nom d'archive invalide.")?;
+    let lowered=filename.to_ascii_lowercase();
+    let suffixes=[".tar.gz",".tar.bz2",".tar.xz",".tar.zst",".zip",".7z",".rar",".tar",".gz",".bz2",".xz",".zst",".cab",".iso",".wim",".arj"];
+    let stem=suffixes.iter().find(|s|lowered.ends_with(*s))
+        .and_then(|s|filename.get(..filename.len()-s.len())).unwrap_or(filename);
+    if stem.is_empty()||stem=="."||stem==".."{return Err("Nom de dossier invalide.".into());}
+    let parent=source.parent().ok_or("Dossier parent introuvable.")?;
+    let folder=parent.join(stem);
+    match fs::symlink_metadata(&folder){
+        Ok(metadata)=>{
+            if !metadata.is_dir()||metadata.file_type().is_symlink()||is_reparse(&metadata){
+                return Err("Destination existante non sûre (fichier, lien ou redirection).".into());
+            }
+        },
+        Err(e) if e.kind()==std::io::ErrorKind::NotFound=>{
+            fs::create_dir(&folder).map_err(|e|format!("Création du dossier impossible : {e}"))?;
+        },
+        Err(e)=>return Err(format!("Destination inaccessible : {e}")),
+    }
+    let verified=fs::canonicalize(&folder).map_err(|e|e.to_string())?;
+    if verified.parent()!=Some(parent){return Err("Le dossier de sortie est redirigé hors du dossier de l'archive.".into());}
+    Ok(verified.to_string_lossy().into_owned())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run(){tauri::Builder::default().plugin(tauri_plugin_dialog::init()).plugin(tauri_plugin_drag::init()).manage(DragExportState::default()).manage(ExtractState::default()).manage(CreateState::default()).manage(ConvertState::default()).manage(AddState::default())
-    .invoke_handler(tauri::generate_handler![list_archive,preview_extraction,extract_archive,cancel_extraction,create_archive,cancel_compression,convert_archive,cancel_conversion,add_to_archive,cancel_add,prepare_drag_export])
+    .invoke_handler(tauri::generate_handler![list_archive,preview_extraction,extract_archive,cancel_extraction,create_archive,cancel_compression,convert_archive,cancel_conversion,add_to_archive,cancel_add,prepare_drag_export,get_shell_launch,ensure_shell_extract_folder])
     .run(tauri::generate_context!()).expect("Impossible de lancer GEKKO ARCHIVE");}

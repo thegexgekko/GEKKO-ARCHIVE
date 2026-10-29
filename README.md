@@ -2,7 +2,7 @@
 
 Utilitaire d'archives pour **Windows 11**, développé avec **React + Tauri 2 + Rust**. Projet indépendant de GEKKO ULTIMATE STUDIO.
 
-## État — V0.4.3 Alpha
+## État — V0.5.0 Alpha
 
 - Ouverture et exploration d'archives ZIP, 7z, RAR et TAR : testées sur Windows 11.
 - Extraction réelle : extraction RAR d'un fichier EXE confirmée après le correctif V0.2.4.
@@ -16,15 +16,21 @@ Utilitaire d'archives pour **Windows 11**, développé avec **React + Tauri 2 + 
 - V0.4.2 : glisser-déposer de fichiers/dossiers depuis l’Explorateur vers GEKKO ARCHIVE, et dépôt d’archives ou de dossiers sur les commandes de l’interface ; disponible, à confirmer séparément sur Windows.
 - V0.4.3 : extraction par glisser-déposer sortant vers l'Explorateur Windows (après préparation temporaire sécurisée) : fonctionnement confirmé sur Windows 11.
 - V0.4.3 : bouton « Tout sélectionner / Tout désélectionner » : testé et validé sur Windows 11 ; permet de préparer plusieurs éléments pour le glisser-déposer.
-- Installateur et menu contextuel moderne Windows 11 : pas encore opérationnels.
+- V0.5.0 : pont local Windows → GEKKO ARCHIVE validé en mode développement (ouverture directe, compression ZIP/7z, extraction ici/vers un dossier). Les quatre commandes de compression/extraction sont maintenant exécutées automatiquement avec les paramètres habituels, sans clic supplémentaire ; les conflits et mots de passe demeurent soumis aux protections existantes.
+- La réception des commandes depuis le script de test et leur exécution automatique ont été confirmées sous Windows 11. Les cas particuliers (conflits de destination, mots de passe, annulation) n'ont pas tous été testés via le pont.
+- Installateur et véritable sous-menu contextuel moderne Windows 11 : pas encore opérationnels.
 
 ## Démarrage en développement (Windows 11)
 
 1. Installer Node.js, Rust/Cargo et les outils C++ nécessaires à Tauri 2.
 2. Lancer `INSTALLER_MOTEUR_7ZIP.bat` pour préparer localement les composants officiels de 7-Zip (téléchargement et vérification SHA-256).
-3. Lancer `LANCER_GEKKO_ARCHIVE.bat`. Lors du premier lancement de V0.4.3, le script installe si nécessaire la dépendance libre de glisser-déposer natif (connexion ponctuelle).
+3. Lancer `LANCER_GEKKO_ARCHIVE.bat`. Lors du premier lancement avec la fonction de glisser-déposer, le script installe si nécessaire la dépendance libre de glisser-déposer natif (connexion ponctuelle).
 
 Le programme de développement utilise les fichiers `src-tauri/resources/7z.exe` et `7z.dll`, fournis **localement** après l'étape 2. Ils ne sont **pas** enregistrés dans ce dépôt. L'utilisation et la redistribution des composants 7-Zip doivent respecter leurs licences, notamment les restrictions spécifiques à unRAR. Lire https://www.7-zip.org/license.txt .
+
+## Pont Windows V0.5.0 (test en développement)
+
+Après lancement de GEKKO ARCHIVE, glisser un fichier ou dossier sur `TESTER_PONT_WINDOWS_V050.bat` permet de choisir l'une des cinq commandes. Le script appelle `ENVOYER_PONT_WINDOWS_V050.ps1` pour transmettre la demande à l'instance déjà ouverte au moyen d'une file locale. Aucun élément de menu contextuel Windows n'est installé par ces scripts. `RECOMPILER_PONT_WINDOWS_V050.bat` sert uniquement à reconstruire le paquet Rust en cas de backend obsolète.
 
 ## Structure
 
