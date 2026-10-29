@@ -2,7 +2,7 @@
 
 Utilitaire d'archives pour **Windows 11**, développé avec **React + Tauri 2 + Rust**. Projet indépendant de GEKKO ULTIMATE STUDIO.
 
-## État — V0.5.0 Alpha
+## État — V0.6.0 Alpha
 
 - Ouverture et exploration d'archives ZIP, 7z, RAR et TAR : testées sur Windows 11.
 - Extraction réelle : extraction RAR d'un fichier EXE confirmée après le correctif V0.2.4.
@@ -18,7 +18,11 @@ Utilitaire d'archives pour **Windows 11**, développé avec **React + Tauri 2 + 
 - V0.4.3 : bouton « Tout sélectionner / Tout désélectionner » : testé et validé sur Windows 11 ; permet de préparer plusieurs éléments pour le glisser-déposer.
 - V0.5.0 : pont local Windows → GEKKO ARCHIVE validé en mode développement (ouverture directe, compression ZIP/7z, extraction ici/vers un dossier). Les quatre commandes de compression/extraction sont maintenant exécutées automatiquement avec les paramètres habituels, sans clic supplémentaire ; les conflits et mots de passe demeurent soumis aux protections existantes.
 - La réception des commandes depuis le script de test et leur exécution automatique ont été confirmées sous Windows 11. Les cas particuliers (conflits de destination, mots de passe, annulation) n'ont pas tous été testés via le pont.
-- Installateur et véritable sous-menu contextuel moderne Windows 11 : pas encore opérationnels.
+- V0.6.0 Alpha : menu contextuel **moderne Windows 11** via extension COM `IExplorerCommand` validé sur le PC de test. Les commandes du sous-menu fonctionnent. Le package MSIX de test est en version **0.6.0.1** et nécessite un certificat de développement autosigné ; la personnalisation et l’installateur de distribution restent à développer.
+
+## Menu contextuel V0.6.0 Alpha (Windows 11)
+
+Sources et procédure expérimentale : [`windows-context-menu-v060/README.md`](windows-context-menu-v060/README.md). La première version de l'extension (MSIX 0.6.0.0) a été mise à jour vers la **0.6.0.1** qui a été testée sous Windows 11. L'installation nécessite une signature et une autorisation explicite pour le certificat de développement ; `LocalMachine/TrustedPeople` s’applique à tous les utilisateurs du PC. Les scripts prévoient une désinstallation et le retrait facultatif de cette confiance. Aucun certificat, DLL ou MSIX de test n'est publié.
 
 ## Démarrage en développement (Windows 11)
 

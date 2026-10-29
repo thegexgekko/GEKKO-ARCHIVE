@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  xmlns:com="http://schemas.microsoft.com/appx/manifest/com/windows10"
+  xmlns:desktop4="http://schemas.microsoft.com/appx/manifest/desktop/windows10/4"
+  xmlns:desktop5="http://schemas.microsoft.com/appx/manifest/desktop/windows10/5"
+  IgnorableNamespaces="uap uap10 rescap com desktop4 desktop5">
+  <Identity Name="GEKKOSoftware.GEKKOArchiveShell" Publisher="CN=GEKKO-Archive-Dev"
+    Version="0.6.0.0" ProcessorArchitecture="x64" />
+  <Properties>
+    <DisplayName>GEKKO ARCHIVE — Menu contextuel</DisplayName>
+    <PublisherDisplayName>GEKKO SOFTWARE</PublisherDisplayName>
+    <Logo>GEKKOArchiveAssets\storelogo.png</Logo>
+    <uap10:AllowExternalContent>true</uap10:AllowExternalContent>
+  </Properties>
+  <Resources><Resource Language="fr-FR" /></Resources>
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.22000.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+  <Applications>
+    <Application Id="GekkoArchive" Executable="gekko-archive.exe"
+      uap10:TrustLevel="mediumIL" uap10:RuntimeBehavior="win32App">
+      <uap:VisualElements AppListEntry="none" DisplayName="GEKKO ARCHIVE"
+        Description="Menu contextuel GEKKO ARCHIVE" BackgroundColor="transparent"
+        Square150x150Logo="GEKKOArchiveAssets\Square150x150Logo.png"
+        Square44x44Logo="GEKKOArchiveAssets\Square44x44Logo.png" />
+      <Extensions>
+        <com:Extension Category="windows.comServer">
+          <com:ComServer>
+            <com:SurrogateServer DisplayName="GEKKO ARCHIVE commands">
+            <com:Class Id="348348C7-F21A-4D5F-8E16-35C9F55212D4" Path="GEKKOArchiveContextV060.dll" ThreadingModel="STA" />
+            <com:Class Id="F69BBECE-46D2-4B63-A928-FDCDEFDE9B61" Path="GEKKOArchiveContextV060.dll" ThreadingModel="STA" />
+            <com:Class Id="70C82349-D338-4980-8C07-BFA70162B297" Path="GEKKOArchiveContextV060.dll" ThreadingModel="STA" />
+            <com:Class Id="B3746AF8-1DD0-439A-A4CD-0A8B96BDEBFD" Path="GEKKOArchiveContextV060.dll" ThreadingModel="STA" />
+            <com:Class Id="3C811319-10B0-40E2-A0F5-678FEFB61917" Path="GEKKOArchiveContextV060.dll" ThreadingModel="STA" />
+            </com:SurrogateServer>
+          </com:ComServer>
+        </com:Extension>
+        <desktop4:Extension Category="windows.fileExplorerContextMenus">
+          <desktop4:FileExplorerContextMenus>
+            <desktop5:ItemType Type="*">
+              <desktop5:Verb Id="GEKKOOpen" Clsid="348348C7-F21A-4D5F-8E16-35C9F55212D4" />
+              <desktop5:Verb Id="GEKKOZip" Clsid="F69BBECE-46D2-4B63-A928-FDCDEFDE9B61" />
+              <desktop5:Verb Id="GEKKOSevenZip" Clsid="70C82349-D338-4980-8C07-BFA70162B297" />
+              <desktop5:Verb Id="GEKKOExtractHere" Clsid="B3746AF8-1DD0-439A-A4CD-0A8B96BDEBFD" />
+              <desktop5:Verb Id="GEKKOExtractFolder" Clsid="3C811319-10B0-40E2-A0F5-678FEFB61917" />
+            </desktop5:ItemType>
+            <desktop5:ItemType Type="Directory">
+              <desktop5:Verb Id="GEKKOZip" Clsid="F69BBECE-46D2-4B63-A928-FDCDEFDE9B61" />
+              <desktop5:Verb Id="GEKKOSevenZip" Clsid="70C82349-D338-4980-8C07-BFA70162B297" />
+            </desktop5:ItemType>
+          </desktop4:FileExplorerContextMenus>
+        </desktop4:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+    <rescap:Capability Name="unvirtualizedResources" />
+  </Capabilities>
+</Package>

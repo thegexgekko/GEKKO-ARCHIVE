@@ -26,3 +26,14 @@ src-tauri/resources/*.exe
 Thumbs.db
 .idea/
 .vscode/
+
+# Menu contextuel Windows : ne versionner que les sources
+windows-context-menu-v060/build/
+windows-context-menu-v060/DIAGNOSTIC_*_RESULTAT.txt
+windows-context-menu-v060/**/*.msix
+windows-context-menu-v060/**/*.dll
+windows-context-menu-v060/**/*.pfx
+windows-context-menu-v060/**/*.cer
+windows-context-menu-v060/**/*.obj
+windows-context-menu-v060/**/*.lib
+windows-context-menu-v060/**/*.exp
