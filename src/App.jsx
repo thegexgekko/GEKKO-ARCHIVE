@@ -165,6 +165,57 @@ function CreationDialog({onClose,onCreated}) {
   </section></div>;
 }
 
+function AddDialog({archive,defaultPassword,onClose,onAdded}) {
+  const [sources,setSources]=useState([]);
+  const [password,setPassword]=useState(defaultPassword||'');
+  const [busy,setBusy]=useState(false);
+  const [cancelAsked,setCancelAsked]=useState(false);
+  const [error,setError]=useState('');
+  const [result,setResult]=useState(null);
+  const [progress,setProgress]=useState({percent:0,message:''});
+  useEffect(()=>{let unlisten;let mounted=true;
+    listen('gekko-compression-progress',e=>{if(mounted)setProgress(e.payload);})
+      .then(off=>{if(mounted)unlisten=off;else off();}).catch(()=>{});
+    return ()=>{mounted=false;unlisten?.();};
+  },[]);
+  const leaf=path=>String(path||'').split(/[\\/]/).filter(Boolean).at(-1)||'';
+  async function choose(directory){
+    if(busy)return;
+    try{
+      const chosen=await open({directory,multiple:!directory});
+      if(chosen){setSources(Array.isArray(chosen)?chosen:[chosen]);setError('');setResult(null);}
+    }catch(e){setError(String(e));}
+  }
+  async function add(){
+    if(!sources.length){setError('Sélectionne au moins un fichier ou un dossier.');return;}
+    setBusy(true);setError('');setCancelAsked(false);setProgress({percent:0,message:'Préparation de l’ajout…'});
+    try{
+      const r=await invoke('add_to_archive',{req:{archivePath:archive.path,sourcePaths:sources,password:password||null}});
+      setResult(r);onAdded(r,password);
+    }catch(e){setError(String(e));}
+    finally{setBusy(false);}
+  }
+  async function cancel(){setCancelAsked(true);try{await invoke('cancel_add');}catch(e){setError(String(e));}}
+  return <div className="extract-overlay" role="presentation"><section className="extract-modal" role="dialog" aria-modal="true" aria-label="Ajouter à une archive">
+    <div className="extract-header"><Icon name="file-plus"/><h2>Ajouter à une archive</h2><button className="iconbtn" disabled={busy} onClick={onClose} aria-label="Fermer"><Icon name="close"/></button></div>
+    <div className="extract-summary"><strong>{archive.name}</strong><span>Ajout à la racine de l'archive</span></div>
+    <div className="create-sources"><div className="create-source-label"><strong>Fichiers et dossiers à ajouter</strong><span>{sources.length?`${sources.length} élément(s)`:'Aucune source'}</span></div>
+      {sources.length>0&&<div className="create-path-list">{sources.map(s=><div key={s}>{leaf(s)}</div>)}</div>}
+      <div className="create-source-buttons"><button className="toolbtn" disabled={busy} onClick={()=>choose(false)}><Icon name="file"/> Choisir des fichiers</button><button className="toolbtn" disabled={busy} onClick={()=>choose(true)}><Icon name="folder-open"/> Choisir un dossier</button></div>
+      <small>La sélection multiple doit provenir d'un même dossier. Aucun fichier existant n'est remplacé.</small>
+    </div>
+    <label className="field">Mot de passe de l'archive (si nécessaire)<input type="password" autoComplete="off" value={password} disabled={busy} onChange={e=>setPassword(e.target.value)} placeholder="Laisser vide si l'archive n'est pas protégée"/></label>
+    {busy&&<div className="extract-progress" role="status"><div className="extract-progress-caption"><span>{progress.message||'Ajout en cours…'}</span><strong>{progress.percent}%</strong></div><div className="extract-track"><div style={{width:`${progress.percent}%`}}/></div></div>}
+    {error&&<div className="error-message" role="alert">{error}</div>}
+    {result&&<div className="extract-success" role="status"><Icon name="check"/><strong>Archive mise à jour et vérifiée</strong><p>{result.path}<br/>{bytes(result.bytes)}</p></div>}
+    <div className="extract-footer">
+      {busy?<button className="toolbtn" disabled={cancelAsked} onClick={cancel}>{cancelAsked?'Annulation demandée…':'Annuler l’ajout'}</button>:<button className="toolbtn" onClick={onClose}>{result?'Fermer':'Annuler'}</button>}
+      {!busy&&!result&&<button className="toolbtn primary" onClick={add}><Icon name="file-plus"/> Ajouter</button>}
+    </div>
+    <p className="fine-print">Disponible pour ZIP et 7z. Le logiciel travaille sur une copie, vérifie le résultat, puis remplace l'archive originale. Les sources restent inchangées.</p>
+  </section></div>;
+}
+
 function ConversionDialog({archive,defaultPassword,onClose,onConverted}) {
   const suggestedFormat=path=>/\.7z$/i.test(String(path||''))?'zip':'7z';
   const suggestedDestination=(path,fmt)=>{
@@ -340,6 +391,7 @@ export default function App(){
   const [extractOpen,setExtractOpen]=useState(false);
   const [createOpen,setCreateOpen]=useState(false);
   const [convertOpen,setConvertOpen]=useState(false);
+  const [addOpen,setAddOpen]=useState(false);
   const [archivePassword,setArchivePassword]=useState('');
   const [passwordPending,setPasswordPending]=useState('');
   const [passwordRetry,setPasswordRetry]=useState(null);
@@ -386,7 +438,7 @@ export default function App(){
     const labels={create:'La création d’archives',add:'L’ajout de fichiers',extract:'L’extraction',convert:'La conversion'};
     notify((labels[action]||'Cette fonction')+' sera développée lors des prochaines étapes.');
   }
-  function doAction(action){if(action==='open'){chooseArchive();return;}if(action==='extract'){openExtraction();return;}if(action==='create'){setCreateOpen(true);return;}if(action==='convert'){setConvertOpen(true);return;}future(action);}
+  function doAction(action){if(action==='open'){chooseArchive();return;}if(action==='extract'){openExtraction();return;}if(action==='create'){setCreateOpen(true);return;}if(action==='convert'){setConvertOpen(true);return;}if(action==='add'){if(!archive){notify('Ouvre d’abord une archive ZIP ou 7z.');chooseArchive();return;}if(!/\.(zip|7z)$/i.test(archive.path)){notify('L’ajout est disponible uniquement pour ZIP et 7z.');return;}setAddOpen(true);return;}future(action);}
   function setImage(file){setCustomBg(URL.createObjectURL(file));setBg('custom');}
   const entries=useMemo(()=>archive?childrenOf(archive.files,folder).filter(f=>f.path.split('/').at(-1).toLocaleLowerCase('fr').includes(search.toLocaleLowerCase('fr'))):[],[archive,folder,search]);
   const folderTrail=folder?folder.split('/'):[];
@@ -435,6 +487,7 @@ export default function App(){
       </main></section>
     </div>
     {createOpen&&<CreationDialog onClose={()=>setCreateOpen(false)} onCreated={(r,openNow=false)=>{if(openNow)loadArchive(r.path);else notify('Archive créée et vérifiée.');}}/>}
+    {addOpen&&archive&&<AddDialog archive={archive} defaultPassword={archivePassword} onClose={()=>setAddOpen(false)} onAdded={(_r,pass)=>{loadArchive(archive.path,pass);notify('Archive mise à jour et vérifiée.');}}/>}
     {convertOpen&&<ConversionDialog archive={archive} defaultPassword={archivePassword} onClose={()=>setConvertOpen(false)} onConverted={()=>notify('Archive convertie et vérifiée. Original conservé.')}/>}
     {extractOpen&&archive&&<ExtractionDialog key={archive.path} archive={archive} selected={selected} defaultPassword={archivePassword} onClose={()=>setExtractOpen(false)} onFinished={r=>notify(`${r.extracted} fichier(s) extrait(s).`)}/>}
     <div className={'toast'+(toast?' show':'')} role="status" aria-live="polite">{toast}</div>

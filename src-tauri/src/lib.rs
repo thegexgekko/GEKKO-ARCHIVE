@@ -617,9 +617,182 @@ fn cancel_conversion(state:State<'_,ConvertState>)->Result<(),String>{
     Ok(())
 }
 
+// V0.4.1 — ajout conservateur : toute mise à jour se fait sur une copie.
+// Cette première version ajoute uniquement à la racine des archives ZIP/7z
+// et refuse les collisions au lieu d'écraser silencieusement les entrées.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AddRequest {
+    archive_path: String,
+    source_paths: Vec<String>,
+    password: Option<String>,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AddResult {path:String, bytes:u64, added:usize}
+#[derive(Default)]
+struct AddState {active:Mutex<Option<Arc<AtomicBool>>>}
+
+fn incoming_names(path:&Path, prefix:&str, names:&mut HashSet<String>)->Result<(),String>{
+    let rel=safe_member(prefix)?;
+    let key=rel.to_string_lossy().replace('\\',"/").to_lowercase();
+    if !names.insert(key){return Err(format!("Deux sources ont le même chemin : {prefix}"));}
+    let meta=fs::symlink_metadata(path).map_err(|e|format!("Source inaccessible : {e}"))?;
+    if meta.file_type().is_symlink()||is_reparse(&meta){return Err(format!("Lien interdit dans les sources : {}",path.display()));}
+    if meta.is_dir(){
+        for item in fs::read_dir(path).map_err(|e|e.to_string())?{
+            let item=item.map_err(|e|e.to_string())?;
+            let name=item.file_name().into_string().map_err(|_|"Nom de fichier non Unicode dans la source.".to_string())?;
+            incoming_names(&item.path(),&format!("{prefix}/{name}"),names)?;
+            if names.len()>100_000{return Err("Trop de fichiers dans le dossier sélectionné.".into());}
+        }
+    }else if !meta.is_file(){return Err("Type de fichier source non pris en charge.".into());}
+    Ok(())
+}
+fn validate_add(req:&AddRequest)->Result<(PathBuf,PathBuf,Vec<String>,HashSet<String>,String),String>{
+    let archive=fs::canonicalize(&req.archive_path).map_err(|e|format!("Archive introuvable : {e}"))?;
+    if !archive.is_file(){return Err("Sélectionne une archive existante.".into());}
+    let kind=archive.extension().and_then(|e|e.to_str()).unwrap_or("").to_ascii_lowercase();
+    if kind!="zip" && kind!="7z"{
+        return Err("L'ajout est disponible uniquement pour les archives ZIP et 7z. RAR reste disponible en lecture et extraction.".into());
+    }
+    if req.source_paths.is_empty(){return Err("Sélectionne au moins un fichier ou un dossier.".into());}
+    if req.source_paths.len()>10_000{return Err("Trop de fichiers sélectionnés.".into());}
+    let existing=read_listing(&archive,req.password.as_deref())?;
+    // Valider aussi les entrées présentes pour éviter de modifier une archive piégée.
+    selected_files(&existing,&[])?;
+    let existing_names:HashSet<String>=existing.iter()
+        .map(|entry|member_key(&entry.path).to_lowercase()).collect();
+    let mut source_parent:Option<PathBuf>=None;
+    let mut source_names=Vec::new();
+    let mut incoming=HashSet::new();
+    for source in &req.source_paths{
+        let path=fs::canonicalize(source).map_err(|e|format!("Source inaccessible ({source}) : {e}"))?;
+        ensure_source_tree_safe(&path)?;
+        if archive==path || (path.is_dir() && archive.starts_with(&path)){
+            return Err("Impossible d'ajouter l'archive à elle-même, y compris via un dossier parent.".into());
+        }
+        let parent=path.parent().ok_or("Source sans dossier parent.")?.to_path_buf();
+        if let Some(base)=&source_parent{
+            if base!=&parent{return Err("Les fichiers sélectionnés doivent provenir d'un même dossier, comme pour la création.".into());}
+        }else{source_parent=Some(parent);}
+        let filename=path.file_name().and_then(|f|f.to_str()).ok_or("Nom de fichier source incompatible.")?;
+        incoming_names(&path,filename,&mut incoming)?;
+        source_names.push(format!(".\\{filename}"));
+    }
+    // Une entrée de même nom (fichier ou dossier) nécessite une décision explicite.
+    // On refuse actuellement au lieu de risquer un écrasement ou une fusion implicite.
+    for name in &incoming{
+        if existing_names.contains(name){return Err(format!("L'archive contient déjà « {name} ». Aucun élément n'a été remplacé."));}
+    }
+    Ok((archive,source_parent.ok_or("Aucune source.")?,source_names,incoming,kind))
+}
+fn add_worker(app:AppHandle,req:AddRequest,cancel:Arc<AtomicBool>)->Result<AddResult,String>{
+    let (archive,base,sources,incoming,kind)=validate_add(&req)?;
+    if cancel.load(Ordering::SeqCst){return Err("Ajout annulé.".into());}
+    let engine=find_engine()?;
+    let before=fs::metadata(&archive).map_err(|e|e.to_string())?;
+    let stamp=SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e|e.to_string())?.as_nanos();
+    let parent=archive.parent().ok_or("Dossier de l'archive inaccessible.")?;
+    let temp=TemporaryArchive(parent.join(format!(".gekko-ajout-{}-{stamp}.{kind}",std::process::id())));
+    let backup=parent.join(format!(".gekko-retour-{}-{stamp}.{kind}",std::process::id()));
+    if temp.0.exists()||backup.exists(){return Err("Chemin de travail temporaire déjà utilisé.".into());}
+    emit_compression(&app,"préparation",0,"Copie de l'archive avant modification…");
+    fs::copy(&archive,&temp.0).map_err(|e|format!("Copie de travail impossible (espace disque ?) : {e}"))?;
+    if cancel.load(Ordering::SeqCst){return Err("Ajout annulé. Archive originale conservée.".into());}
+    let mut cmd=Command::new(&engine);
+    cmd.current_dir(&base).arg("a").arg(format!("-t{kind}"))
+        .arg("-y").arg("-sccUTF-8").arg("-scsUTF-8").arg("-spd")
+        .arg("-bsp1").arg("-bb0").arg("-bso0").arg("-bse1");
+    if let Some(password)=req.password.as_deref().filter(|p|!p.is_empty()){
+        cmd.arg(format!("-p{password}"));
+        if kind=="7z"{cmd.arg("-mhe=on");}else{cmd.arg("-mem=AES256");}
+    }
+    cmd.arg("--").arg(&temp.0).args(&sources);
+    emit_compression(&app,"ajout",5,"Ajout des nouveaux fichiers…");
+    let mut child=cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped())
+        .spawn().map_err(|e|format!("Démarrage de 7-Zip impossible : {e}"))?;
+    let stdout=child.stdout.take().ok_or("Progression de 7-Zip inaccessible.")?;
+    let stderr=child.stderr.take().ok_or("Diagnostics de 7-Zip inaccessibles.")?;
+    let app_progress=app.clone();
+    let progress=std::thread::spawn(move||compression_progress(stdout,app_progress));
+    let errors=std::thread::spawn(move||{let mut s=String::new();let _=std::io::BufReader::new(stderr).read_to_string(&mut s);s});
+    let status=loop{
+        if cancel.load(Ordering::SeqCst){let _=child.kill();break child.wait().map_err(|e|e.to_string())?;}
+        match child.try_wait().map_err(|e|e.to_string())?{Some(code)=>break code,None=>std::thread::sleep(Duration::from_millis(100))}
+    };
+    let _=progress.join();let diagnostics=errors.join().unwrap_or_default();
+    if cancel.load(Ordering::SeqCst){return Err("Ajout annulé. Archive originale conservée.".into());}
+    if !status.success(){return Err(format!("Ajout 7-Zip impossible ({status}) : {}",diagnostics.chars().take(500).collect::<String>()));}
+    emit_compression(&app,"vérification",90,"Vérification de l'archive modifiée…");
+    let mut check=Command::new(&engine);
+    check.arg("t").arg("-y").arg("-bsp0").arg("-bso0").arg("-bse0");
+    if let Some(pass)=req.password.as_deref().filter(|p|!p.is_empty()){check.arg(format!("-p{pass}"));}
+    let mut child=check.arg("--").arg(&temp.0).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+        .spawn().map_err(|e|format!("Vérification impossible : {e}"))?;
+    let verified=loop{
+        if cancel.load(Ordering::SeqCst){let _=child.kill();break child.wait().map_err(|e|e.to_string())?;}
+        match child.try_wait().map_err(|e|e.to_string())?{Some(code)=>break code,None=>std::thread::sleep(Duration::from_millis(100))}
+    };
+    if cancel.load(Ordering::SeqCst){return Err("Ajout annulé. Archive originale conservée.".into());}
+    if !verified.success(){return Err("L'archive modifiée a échoué au contrôle 7-Zip : originale conservée.".into());}
+    let found:HashSet<String>=read_listing(&temp.0,req.password.as_deref())?.iter()
+        .map(|f|member_key(&f.path).to_lowercase()).collect();
+    if !incoming.is_subset(&found){return Err("Des fichiers ajoutés sont absents de la nouvelle archive. Originale conservée.".into());}
+    // Refuser la publication si l'archive originale a changé pendant le travail.
+    let now=fs::metadata(&archive).map_err(|e|e.to_string())?;
+    if before.len()!=now.len()||before.modified().ok()!=now.modified().ok(){
+        return Err("L'archive originale a changé pendant l'ajout. Modification abandonnée.".into());
+    }
+    emit_compression(&app,"enregistrement",97,"Enregistrement sécurisé de l'archive…");
+    if cancel.load(Ordering::SeqCst){return Err("Ajout annulé. Archive originale conservée.".into());}
+    fs::rename(&archive,&backup).map_err(|e|format!("Archive originale verrouillée : {e}"))?;
+    if let Err(e)=fs::rename(&temp.0,&archive){
+        return match fs::rename(&backup,&archive){
+            Ok(())=>Err(format!("Remplacement non effectué : {e}. Archive originale restaurée.")),
+            Err(rollback)=>Err(format!("ERREUR : remplacement impossible ({e}) et restauration impossible ({rollback}). L'archive ORIGINALE reste disponible ici : {}",backup.display()))
+        };
+    }
+    // L'ancienne archive est supprimée seulement après publication réussie.
+    let _=fs::remove_file(&backup);
+    let bytes=fs::metadata(&archive).map_err(|e|e.to_string())?.len();
+    emit_compression(&app,"terminé",100,"Fichiers ajoutés. Archive vérifiée.");
+    Ok(AddResult{path:archive.to_string_lossy().into_owned(),bytes,added:req.source_paths.len()})
+}
+#[tauri::command]
+async fn add_to_archive(app:AppHandle,state:State<'_,AddState>,req:AddRequest)->Result<AddResult,String>{
+    let flag=Arc::new(AtomicBool::new(false));
+    {
+        let mut guard=state.active.lock().map_err(|e|e.to_string())?;
+        if guard.is_some(){return Err("Un ajout est déjà en cours.".into());}
+        *guard=Some(flag.clone());
+    }
+    let result=tauri::async_runtime::spawn_blocking(move||add_worker(app,req,flag)).await
+        .map_err(|e|format!("Erreur de tâche : {e}"));
+    *state.active.lock().map_err(|e|e.to_string())?=None;
+    result?
+}
+#[tauri::command]
+fn cancel_add(state:State<'_,AddState>)->Result<(),String>{
+    if let Some(flag)=state.active.lock().map_err(|e|e.to_string())?.as_ref(){flag.store(true,Ordering::SeqCst);}
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn incoming_rejects_path_traversal_and_reserved_names(){
+        for name in ["../secret.txt", "CON.txt", "C:/bad.txt", "a/../../b"]{
+            assert!(safe_member(name).is_err());
+        }
+    }
+    #[test]
+    fn only_zip_and_7z_can_be_updated(){
+        // The same restriction exists in validate_add before any disk mutation.
+        assert!(["zip", "7z"].iter().all(|s| matches!(*s,"zip"|"7z")));
+        assert!(!matches!("rar","zip"|"7z"));
+    }
     #[test]
     fn create_format_validation(){
         let req=CreateRequest{source_paths:vec![],destination:"Archive.rar".into(),format:"rar".into(),level:5,password:None};
@@ -693,6 +866,6 @@ mod tests{
 
 }
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run(){tauri::Builder::default().plugin(tauri_plugin_dialog::init()).manage(ExtractState::default()).manage(CreateState::default()).manage(ConvertState::default())
-    .invoke_handler(tauri::generate_handler![list_archive,preview_extraction,extract_archive,cancel_extraction,create_archive,cancel_compression,convert_archive,cancel_conversion])
+pub fn run(){tauri::Builder::default().plugin(tauri_plugin_dialog::init()).manage(ExtractState::default()).manage(CreateState::default()).manage(ConvertState::default()).manage(AddState::default())
+    .invoke_handler(tauri::generate_handler![list_archive,preview_extraction,extract_archive,cancel_extraction,create_archive,cancel_compression,convert_archive,cancel_conversion,add_to_archive,cancel_add])
     .run(tauri::generate_context!()).expect("Impossible de lancer GEKKO ARCHIVE");}

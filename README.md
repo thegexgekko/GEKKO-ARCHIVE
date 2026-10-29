@@ -2,7 +2,7 @@
 
 Utilitaire d'archives pour **Windows 11**, développé avec **React + Tauri 2 + Rust**. Projet indépendant de GEKKO ULTIMATE STUDIO.
 
-## État — V0.4.0 Alpha
+## État — V0.4.1 Alpha
 
 - Ouverture et exploration d'archives ZIP, 7z, RAR et TAR : testées sur Windows 11.
 - Extraction réelle : extraction RAR d'un fichier EXE confirmée après le correctif V0.2.4.
@@ -11,7 +11,9 @@ Utilitaire d'archives pour **Windows 11**, développé avec **React + Tauri 2 + 
 - Conversion testée sur Windows 11 : RAR → ZIP, RAR → 7z, ZIP → 7z et 7z → ZIP ; conservation du contenu confirmée. L'archive originale est conservée.
 - Fonction « Tester » retirée de l'interface à la demande de l'utilisateur ; les vérifications internes de création et d'extraction demeurent.
 - À confirmer : extraction sélective, cas de conflits, annulation d'extraction et conversion, conversion de sources chiffrées.
-- Ajout à une archive existante, installateur et menu contextuel Windows 11 : pas encore opérationnels.
+- Ajout de fichiers et dossiers à la racine d'une archive ZIP ou 7z existante : testé sur Windows 11, avec conservation des fichiers déjà présents.
+- L'ajout refuse les collisions de noms, modifie une copie temporaire et vérifie le résultat avant remplacement de l'archive. La gestion des conflits et les archives protégées restent à tester séparément.
+- Installateur et menu contextuel moderne Windows 11 : pas encore opérationnels.
 
 ## Démarrage en développement (Windows 11)
 
@@ -24,7 +26,7 @@ Le programme de développement utilise les fichiers `src-tauri/resources/7z.exe`
 ## Structure
 
 - `src/` : interface React, illustrations GEKKO ARCHIVE.
-- `src-tauri/src/` : backend Rust, exploration, extraction, compression et conversion.
+- `src-tauri/src/` : backend Rust, exploration, extraction, compression, conversion et ajout de fichiers.
 - `src-tauri/capabilities/` : autorisations Tauri.
 - `INSTALLER_MOTEUR_7ZIP.*` : préparation locale du moteur 7-Zip.
 
