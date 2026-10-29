@@ -519,6 +519,104 @@ fn cancel_compression(state:State<'_,CreateState>)->Result<(),String>{
     Ok(())
 }
 
+// V0.4.0 — conversion sans modification de l'archive source.
+// Réutilise les mêmes contrôles de chemins, de liens et de CRC que les
+// fonctions d'extraction et de création déjà validées sur Windows 11.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConvertRequest {
+    source_path: String, destination: String, format: String,
+    level: u8, source_password: Option<String>, password: Option<String>,
+}
+#[derive(Default)]
+struct ConvertState {active:Mutex<Option<Arc<AtomicBool>>>}
+fn emit_conversion(app:&AppHandle, phase:&str, percent:u8, message:&str){
+    let _=app.emit("gekko-conversion-progress",Progress{
+        phase:phase.into(),percent,message:message.into()
+    });
+}
+fn conversion_worker(app:AppHandle, req:ConvertRequest, cancelled:Arc<AtomicBool>)->Result<CreateResult,String>{
+    let source=fs::canonicalize(&req.source_path)
+        .map_err(|e|format!("Archive source introuvable : {e}"))?;
+    if !source.is_file(){return Err("La source doit être une archive existante.".into());}
+    let out=PathBuf::from(req.destination.trim());
+    if out.as_os_str().is_empty(){return Err("Choisis un emplacement de sortie.".into());}
+    // Contrôle précoce, pour ne pas décompresser si la cible est déjà prise.
+    if out.exists(){return Err("Le fichier de sortie existe déjà. Choisis un autre nom : aucune archive n'est écrasée.".into());}
+    let output_folder=out.parent().filter(|p|!p.as_os_str().is_empty())
+        .ok_or("Dossier de sortie invalide.")?;
+    let output_folder=fs::canonicalize(output_folder)
+        .map_err(|e|format!("Dossier de sortie inaccessible : {e}"))?;
+    if !output_folder.is_dir(){return Err("Le dossier de sortie est invalide.".into());}
+    let out_filename=out.file_name().ok_or("Nom de fichier de sortie invalide.")?;
+    let output_file=output_folder.join(out_filename);
+    if source==output_file{return Err("La destination doit être différente de l'archive source.".into());}
+    if !matches!(req.format.to_ascii_lowercase().as_str(),"7z"|"zip"){
+        return Err("Formats de conversion disponibles : ZIP et 7z.".into());
+    }
+    if !matches!(req.level,0|1|5|9){return Err("Niveau de compression invalide.".into());}
+    if !out.extension().and_then(|v|v.to_str()).unwrap_or("").eq_ignore_ascii_case(&req.format){
+        return Err("L'extension de sortie doit correspondre au format choisi.".into());
+    }
+    if cancelled.load(Ordering::SeqCst){return Err("Conversion annulée.".into());}
+    emit_conversion(&app,"préparation",0,"Préparation de la conversion…");
+    let stage=create_stage()?;
+    let extraction=ExtractRequest{
+        archive_path:source.to_string_lossy().into_owned(),
+        destination:stage.0.to_string_lossy().into_owned(),
+        selected_paths:Vec::new(),password:req.source_password,
+        policy:"ask".into(),decisions:HashMap::new(),
+    };
+    // extract_worker réalise déjà les contrôles de chemins, les vérifications
+    // des liens ainsi que l'extraction sécurisée avant transfert.
+    let _=extract_worker(app.clone(),extraction,cancelled.clone())?;
+    if cancelled.load(Ordering::SeqCst){return Err("Conversion annulée.".into());}
+    // Ne pas introduire un dossier racine artificiel dans l'archive convertie.
+    let mut contents=Vec::new();
+    for entry in fs::read_dir(&stage.0).map_err(|e|e.to_string())?{
+        let entry=entry.map_err(|e|e.to_string())?;
+        contents.push(entry.path().to_string_lossy().into_owned());
+    }
+    if contents.is_empty(){return Err("Archive source vide : aucune donnée à convertir.".into());}
+    emit_conversion(&app,"compression",45,"Création du nouveau format…");
+    let create=CreateRequest{
+        source_paths:contents,
+        destination:output_file.to_string_lossy().into_owned(),
+        format:req.format,level:req.level,password:req.password,
+    };
+    // create_worker produit une archive temporaire, vérifie son intégrité et
+    // refuse de remplacer un fichier existant. L'archive source reste intacte.
+    let result=create_worker(app.clone(),create,cancelled.clone())?;
+    if cancelled.load(Ordering::SeqCst){
+        // Une annulation très tardive peut arriver juste après la publication.
+        // On ne supprime pas un fichier terminé à ce stade.
+        emit_conversion(&app,"terminé",100,"Conversion terminée.");
+    } else {
+        emit_conversion(&app,"terminé",100,"Conversion terminée et archive vérifiée.");
+    }
+    Ok(result)
+}
+#[tauri::command]
+async fn convert_archive(app:AppHandle,state:State<'_,ConvertState>,req:ConvertRequest)->Result<CreateResult,String>{
+    let flag=Arc::new(AtomicBool::new(false));
+    {
+        let mut lock=state.active.lock().map_err(|e|e.to_string())?;
+        if lock.is_some(){return Err("Une conversion est déjà en cours.".into());}
+        *lock=Some(flag.clone());
+    }
+    let response=tauri::async_runtime::spawn_blocking(move||conversion_worker(app,req,flag))
+        .await.map_err(|e|format!("Erreur de tâche : {e}"));
+    *state.active.lock().map_err(|e|e.to_string())?=None;
+    response?
+}
+#[tauri::command]
+fn cancel_conversion(state:State<'_,ConvertState>)->Result<(),String>{
+    if let Some(flag)=state.active.lock().map_err(|e|e.to_string())?.as_ref(){
+        flag.store(true,Ordering::SeqCst);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests{
     use super::*;
@@ -595,6 +693,6 @@ mod tests{
 
 }
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run(){tauri::Builder::default().plugin(tauri_plugin_dialog::init()).manage(ExtractState::default()).manage(CreateState::default())
-    .invoke_handler(tauri::generate_handler![list_archive,preview_extraction,extract_archive,cancel_extraction,create_archive,cancel_compression])
+pub fn run(){tauri::Builder::default().plugin(tauri_plugin_dialog::init()).manage(ExtractState::default()).manage(CreateState::default()).manage(ConvertState::default())
+    .invoke_handler(tauri::generate_handler![list_archive,preview_extraction,extract_archive,cancel_extraction,create_archive,cancel_compression,convert_archive,cancel_conversion])
     .run(tauri::generate_context!()).expect("Impossible de lancer GEKKO ARCHIVE");}

@@ -2,13 +2,16 @@
 
 Utilitaire d'archives pour **Windows 11**, développé avec **React + Tauri 2 + Rust**. Projet indépendant de GEKKO ULTIMATE STUDIO.
 
-## État — V0.3.0 Alpha
+## État — V0.4.0 Alpha
 
 - Ouverture et exploration d'archives ZIP, 7z, RAR et TAR : testées sur Windows 11.
 - Extraction réelle : extraction RAR d'un fichier EXE confirmée après le correctif V0.2.4.
 - Sélection des fichiers, destination proposée automatiquement (dossier de l'archive), choix de dossier, gestion des conflits, mots de passe, progression et annulation : fonctionnalités implémentées, tests complémentaires nécessaires.
-- Création ZIP / 7z : première implémentation disponible (fichiers ou dossier, niveau de compression, AES-256, progression, annulation, vérification avant enregistrement), à valider sous Windows 11.
-- Ajout à une archive existante, conversion, menu contextuel Windows 11 : non encore opérationnels.
+- Création ZIP et 7z validée sur Windows 11 : fichiers et dossiers complets, protection par mot de passe, niveaux rapide / normal / maximum et annulation de compression.
+- Conversion testée sur Windows 11 : RAR → ZIP, RAR → 7z, ZIP → 7z et 7z → ZIP ; conservation du contenu confirmée. L'archive originale est conservée.
+- Fonction « Tester » retirée de l'interface à la demande de l'utilisateur ; les vérifications internes de création et d'extraction demeurent.
+- À confirmer : extraction sélective, cas de conflits, annulation d'extraction et conversion, conversion de sources chiffrées.
+- Ajout à une archive existante, installateur et menu contextuel Windows 11 : pas encore opérationnels.
 
 ## Démarrage en développement (Windows 11)
 
@@ -21,7 +24,7 @@ Le programme de développement utilise les fichiers `src-tauri/resources/7z.exe`
 ## Structure
 
 - `src/` : interface React, illustrations GEKKO ARCHIVE.
-- `src-tauri/src/` : backend Rust, exploration et extraction.
+- `src-tauri/src/` : backend Rust, exploration, extraction, compression et conversion.
 - `src-tauri/capabilities/` : autorisations Tauri.
 - `INSTALLER_MOTEUR_7ZIP.*` : préparation locale du moteur 7-Zip.
 

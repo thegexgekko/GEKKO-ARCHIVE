@@ -17,13 +17,12 @@ const actions = [
   {id:'open',text:'Ouvrir une archive',icon:'folder-open'},
   {id:'add',text:'Ajouter',icon:'file-plus'},
   {id:'extract',text:'Extraire une archive',icon:'package-open'},
-  {id:'test',text:'Tester',icon:'shield-check'},
   {id:'convert',text:'Convertir une archive',icon:'repeat'}
 ];
 const menuLabels = [
   ['zip','Compresser en ZIP'], ['7z','Compresser en 7z'],
   ['extractHere','Extraire ici'], ['extractFolder','Extraire dans un dossier…'],
-  ['open','Ouvrir avec GEKKO ARCHIVE'], ['test','Tester l’archive']
+  ['open','Ouvrir avec GEKKO ARCHIVE']
 ];
 function bytes(value) {
   if (!Number.isFinite(value)) return '—';
@@ -166,6 +165,86 @@ function CreationDialog({onClose,onCreated}) {
   </section></div>;
 }
 
+function ConversionDialog({archive,defaultPassword,onClose,onConverted}) {
+  const suggestedFormat=path=>/\.7z$/i.test(String(path||''))?'zip':'7z';
+  const suggestedDestination=(path,fmt)=>{
+    if(!path)return '';
+    const parent=archiveParentDirectory(path);
+    const name=String(path).split(/[\\/]/).at(-1)||'archive';
+    const stem=name.replace(/\.(tar\.(?:gz|bz2|xz|zst)|zip|7z|rar|tar|gz|bz2|xz|zst)$/i,'')||'archive';
+    return (parent.endsWith('\\')||parent.endsWith('/')?parent:parent+'\\')+stem+'_converti.'+fmt;
+  };
+  const [source,setSource]=useState(archive?.path||'');
+  const [format,setFormat]=useState(()=>suggestedFormat(archive?.path));
+  const [destination,setDestination]=useState(()=>suggestedDestination(archive?.path,suggestedFormat(archive?.path)));
+  const [level,setLevel]=useState('5');
+  const [sourcePassword,setSourcePassword]=useState(defaultPassword||'');
+  const [password,setPassword]=useState('');
+  const [confirm,setConfirm]=useState('');
+  const [busy,setBusy]=useState(false);
+  const [cancelAsked,setCancelAsked]=useState(false);
+  const [error,setError]=useState('');
+  const [result,setResult]=useState(null);
+  const [progress,setProgress]=useState({phase:'préparation',percent:0,message:''});
+  useEffect(()=>{
+    let active=true;const off=[];
+    const add=(name,callback)=>listen(name,e=>{if(active)callback(e.payload)}).then(fn=>{if(active)off.push(fn);else fn();}).catch(()=>{});
+    add('gekko-extraction-progress',p=>setProgress({phase:'extraction',percent:Math.round((p.percent||0)*.45),message:'Lecture et extraction temporaire…'}));
+    add('gekko-compression-progress',p=>setProgress({phase:'compression',percent:45+Math.round((p.percent||0)*.54),message:'Création et vérification de la nouvelle archive…'}));
+    add('gekko-conversion-progress',p=>{
+      if(p.phase==='terminé')setProgress(p);
+      else if(p.phase==='préparation')setProgress(p);
+    });
+    return ()=>{active=false;off.forEach(fn=>fn());};
+  },[]);
+  async function chooseSource(){
+    if(busy)return;
+    try {
+      const path=await open({multiple:false,directory:false,filters:[{name:'Archives',extensions:['zip','7z','rar','tar','gz','bz2','xz','zst','cab','iso','wim','arj','lzma']}]});
+      if(path){const next=suggestedFormat(path);setSource(path);setFormat(next);setDestination(suggestedDestination(path,next));setSourcePassword(path===archive?.path?defaultPassword||'':'');setResult(null);setError('');}
+    }catch(e){setError(String(e));}
+  }
+  function changeFormat(next){setFormat(next);setDestination(suggestedDestination(source,next));setResult(null);setError('');}
+  async function chooseDestination(){
+    try {
+      const chosen=await save({defaultPath:destination||'Archive_convertie.'+format,filters:[{name:format.toUpperCase(),extensions:[format]}]});
+      if(chosen)setDestination(/\.(zip|7z)$/i.test(chosen)?chosen:chosen+'.'+format);
+    }catch(e){setError(String(e));}
+  }
+  async function launch(){
+    if(busy)return;
+    if(!source){setError('Sélectionne une archive source.');return;}
+    if(!destination.trim()){setError('Choisis un emplacement de sortie.');return;}
+    if(password!==confirm){setError('Les mots de passe de sortie ne correspondent pas.');return;}
+    setBusy(true);setCancelAsked(false);setError('');setResult(null);
+    setProgress({phase:'préparation',percent:0,message:'Préparation de la conversion…'});
+    try {
+      const r=await invoke('convert_archive',{req:{sourcePath:source,destination,format,level:Number(level),sourcePassword:sourcePassword||null,password:password||null}});
+      setResult(r);onConverted(r);
+    }catch(e){setError(String(e));}finally{setBusy(false);}
+  }
+  async function cancel(){setCancelAsked(true);try{await invoke('cancel_conversion');}catch(e){setError(String(e));}}
+  return <div className="extract-overlay" role="presentation"><section className="extract-modal" role="dialog" aria-modal="true" aria-label="Convertir une archive">
+    <div className="extract-header"><Icon name="repeat"/><h2>Convertir une archive</h2><button className="iconbtn" disabled={busy} onClick={onClose} aria-label="Fermer"><Icon name="close"/></button></div>
+    <label className="field">Archive source</label>
+    <div className="extract-destination"><input value={source} readOnly placeholder="Sélectionne une archive à convertir…"/><button className="toolbtn" disabled={busy} onClick={chooseSource}><Icon name="folder-open"/> Parcourir</button></div>
+    <label className="field">Emplacement et nom de l'archive convertie</label>
+    <div className="extract-destination"><input value={destination} disabled={busy} onChange={e=>setDestination(e.target.value)} placeholder="Dossier\\Archive_convertie.7z"/><button className="toolbtn" disabled={busy} onClick={chooseDestination}><Icon name="folder-open"/> Parcourir</button></div>
+    <div className="extract-grid"><label className="field">Format de sortie<select value={format} disabled={busy} onChange={e=>changeFormat(e.target.value)}><option value="7z">7z</option><option value="zip">ZIP</option></select></label>
+      <label className="field">Niveau de compression<select value={level} disabled={busy} onChange={e=>setLevel(e.target.value)}><option value="0">Sans compression</option><option value="1">Rapide</option><option value="5">Normal</option><option value="9">Maximum</option></select></label></div>
+    <label className="field">Mot de passe de l'archive source (si nécessaire)<input type="password" autoComplete="off" disabled={busy} value={sourcePassword} onChange={e=>setSourcePassword(e.target.value)} placeholder="Pour une archive chiffrée"/></label>
+    <div className="extract-grid"><label className="field">Mot de passe de sortie (facultatif)<input type="password" autoComplete="new-password" disabled={busy} value={password} onChange={e=>setPassword(e.target.value)}/></label>
+      <label className="field">Confirmer le mot de passe<input type="password" autoComplete="new-password" disabled={busy} value={confirm} onChange={e=>setConfirm(e.target.value)}/></label></div>
+    {busy&&<div className="extract-progress" role="status"><div className="extract-progress-caption"><span>{progress.message||'Conversion en cours…'}</span><strong>{progress.percent}%</strong></div><div className="extract-track"><div style={{width:`${progress.percent}%`}}/></div></div>}
+    {error&&<div role="alert" className="error-message">{error}</div>}
+    {result&&<div className="extract-success" role="status"><Icon name="check"/><strong>Conversion terminée</strong><p>{result.path}<br/>{bytes(result.bytes)}</p></div>}
+    <div className="extract-footer">{busy?<button className="toolbtn" disabled={cancelAsked} onClick={cancel}>{cancelAsked?'Annulation demandée…':'Annuler la conversion'}</button>:<button className="toolbtn" onClick={onClose}>{result?'Fermer':'Annuler'}</button>}
+      {!busy&&!result&&<button className="toolbtn primary" onClick={launch}><Icon name="repeat"/> Convertir</button>}
+    </div>
+    <p className="fine-print">L'original est conservé. Conversion locale avec vérification automatique ; aucun fichier existant n'est écrasé.</p>
+  </section></div>;
+}
+
 function ExtractionDialog({archive,selected,onClose,onFinished,defaultPassword}) {
   const [destination,setDestination]=useState(()=>archiveParentDirectory(archive.path));
   const [password,setPassword]=useState(defaultPassword||'');
@@ -260,6 +339,7 @@ export default function App(){
   const [customBg,setCustomBg]=useState('');
   const [extractOpen,setExtractOpen]=useState(false);
   const [createOpen,setCreateOpen]=useState(false);
+  const [convertOpen,setConvertOpen]=useState(false);
   const [archivePassword,setArchivePassword]=useState('');
   const [passwordPending,setPasswordPending]=useState('');
   const [passwordRetry,setPasswordRetry]=useState(null);
@@ -303,10 +383,10 @@ export default function App(){
     setRoute(routeName);
   }
   function future(action){
-    const labels={create:'La création d’archives',add:'L’ajout de fichiers',extract:'L’extraction',test:'Le test d’intégrité',convert:'La conversion'};
+    const labels={create:'La création d’archives',add:'L’ajout de fichiers',extract:'L’extraction',convert:'La conversion'};
     notify((labels[action]||'Cette fonction')+' sera développée lors des prochaines étapes.');
   }
-  function doAction(action){if(action==='open'){chooseArchive();return;}if(action==='extract'){openExtraction();return;}if(action==='create'){setCreateOpen(true);return;}future(action);}
+  function doAction(action){if(action==='open'){chooseArchive();return;}if(action==='extract'){openExtraction();return;}if(action==='create'){setCreateOpen(true);return;}if(action==='convert'){setConvertOpen(true);return;}future(action);}
   function setImage(file){setCustomBg(URL.createObjectURL(file));setBg('custom');}
   const entries=useMemo(()=>archive?childrenOf(archive.files,folder).filter(f=>f.path.split('/').at(-1).toLocaleLowerCase('fr').includes(search.toLocaleLowerCase('fr'))):[],[archive,folder,search]);
   const folderTrail=folder?folder.split('/'):[];
@@ -355,6 +435,7 @@ export default function App(){
       </main></section>
     </div>
     {createOpen&&<CreationDialog onClose={()=>setCreateOpen(false)} onCreated={(r,openNow=false)=>{if(openNow)loadArchive(r.path);else notify('Archive créée et vérifiée.');}}/>}
+    {convertOpen&&<ConversionDialog archive={archive} defaultPassword={archivePassword} onClose={()=>setConvertOpen(false)} onConverted={()=>notify('Archive convertie et vérifiée. Original conservé.')}/>}
     {extractOpen&&archive&&<ExtractionDialog key={archive.path} archive={archive} selected={selected} defaultPassword={archivePassword} onClose={()=>setExtractOpen(false)} onFinished={r=>notify(`${r.extracted} fichier(s) extrait(s).`)}/>}
     <div className={'toast'+(toast?' show':'')} role="status" aria-live="polite">{toast}</div>
   </div>;
