@@ -1,7 +1,7 @@
 import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {invoke} from '@tauri-apps/api/core';
 import {getCurrentWindow} from '@tauri-apps/api/window';
-import {open} from '@tauri-apps/plugin-dialog';
+import {open, save} from '@tauri-apps/plugin-dialog';
 import {listen} from '@tauri-apps/api/event';
 import {Icon} from './icons.jsx';
 import heroLogo from './assets/GEKKO_ARCHIVE.png';
@@ -82,6 +82,90 @@ function Settings({bg,setBg,alpha,setAlpha,info,setInfo,menuOps,setMenuOps,setIm
     </section>
   </div>;
 }
+function CreationDialog({onClose,onCreated}) {
+  const [sources,setSources]=useState([]);
+  const [format,setFormat]=useState('7z');
+  const [destination,setDestination]=useState('');
+  const [level,setLevel]=useState('5');
+  const [password,setPassword]=useState('');
+  const [passwordConfirm,setPasswordConfirm]=useState('');
+  const [busy,setBusy]=useState(false);
+  const [error,setError]=useState('');
+  const [progress,setProgress]=useState({phase:'',percent:0,message:''});
+  const [result,setResult]=useState(null);
+  const [cancelAsked,setCancelAsked]=useState(false);
+  useEffect(()=>{let unlisten;let mounted=true;
+    listen('gekko-compression-progress',event=>{if(mounted)setProgress(event.payload);})
+      .then(fn=>{if(mounted)unlisten=fn;else fn();}).catch(()=>{});
+    return ()=>{mounted=false;unlisten?.();};
+  },[]);
+  const leaf=path=>String(path||'').split(/[\\/]/).filter(Boolean).at(-1)||'Archive';
+  function suggestedOutput(paths,fmt){
+    if(!paths.length)return '';
+    const dir=archiveParentDirectory(paths[0]);
+    const basename=paths.length===1?leaf(paths[0]):'Nouvelle_archive';
+    const base=basename.replace(/\.(7z|zip|rar|tar|gz|xz)$/i,'')||'Nouvelle_archive';
+    return (dir.endsWith('\\')||dir.endsWith('/')?dir:dir+'\\')+base+'.'+fmt;
+  }
+  async function chooseFiles(directory){
+    if(busy)return;
+    try{
+      const chosen=await open({directory,multiple:!directory});
+      if(!chosen)return;
+      const paths=Array.isArray(chosen)?chosen:[chosen];
+      setSources(paths);setDestination(suggestedOutput(paths,format));setResult(null);setError('');
+    }catch(e){setError(String(e));}
+  }
+  function changeFormat(fmt){
+    setFormat(fmt);
+    setDestination(prev=>prev?prev.replace(/\.(7z|zip)$/i,'')+'.'+fmt:suggestedOutput(sources,fmt));
+  }
+  async function chooseDestination(){
+    try{
+      const chosen=await save({defaultPath:destination||'Nouvelle_archive.'+format,
+        filters:[{name:format.toUpperCase(),extensions:[format]}]});
+      if(chosen)setDestination(/\.(zip|7z)$/i.test(chosen)?chosen:chosen+'.'+format);
+    }catch(e){setError(String(e));}
+  }
+  async function launch(){
+    if(busy)return;
+    if(!sources.length){setError('Sélectionne des fichiers ou un dossier source.');return;}
+    if(!destination.trim()){setError("Choisis l'emplacement de l'archive.");return;}
+    if(password!==passwordConfirm){setError('Les deux mots de passe ne correspondent pas.');return;}
+    setError('');setBusy(true);setCancelAsked(false);
+    setProgress({phase:'préparation',percent:0,message:'Préparation…'});
+    try{
+      const r=await invoke('create_archive',{req:{sourcePaths:sources,destination,
+        format,level:Number(level),password:password||null}});
+      setResult(r);onCreated(r);
+    }catch(e){setError(String(e));}finally{setBusy(false);}
+  }
+  async function cancel(){setCancelAsked(true);try{await invoke('cancel_compression');}catch(e){setError(String(e));}}
+  return <div className="extract-overlay" role="presentation"><section className="extract-modal" role="dialog" aria-modal="true" aria-label="Créer une archive">
+    <div className="extract-header"><Icon name="plus"/><h2>Créer une archive</h2><button className="iconbtn" onClick={onClose} disabled={busy} aria-label="Fermer"><Icon name="close"/></button></div>
+    <div className="create-sources"><div className="create-source-label"><strong>Fichiers et dossiers à compresser</strong><span>{sources.length?`${sources.length} élément(s)`:'Aucune source sélectionnée'}</span></div>
+      {sources.length>0&&<div className="create-path-list" title={sources.join('\n')}>{sources.map(item=><div key={item}>{leaf(item)}</div>)}</div>}
+      <div className="create-source-buttons"><button className="toolbtn" disabled={busy} onClick={()=>chooseFiles(false)}><Icon name="file"/> Choisir des fichiers</button><button className="toolbtn" disabled={busy} onClick={()=>chooseFiles(true)}><Icon name="folder-open"/> Choisir un dossier</button></div>
+      <small>La sélection multiple de fichiers doit provenir d'un même dossier.</small>
+    </div>
+    <label className="field">Emplacement et nom de l'archive</label>
+    <div className="extract-destination"><input value={destination} disabled={busy} onChange={e=>setDestination(e.target.value)} placeholder="Dossier\\Archive.7z"/><button className="toolbtn" disabled={busy} onClick={chooseDestination}><Icon name="folder-open"/> Parcourir</button></div>
+    <div className="extract-grid"><label className="field">Format<select value={format} disabled={busy} onChange={e=>changeFormat(e.target.value)}><option value="7z">7z</option><option value="zip">ZIP</option></select></label>
+      <label className="field">Niveau de compression<select value={level} disabled={busy} onChange={e=>setLevel(e.target.value)}><option value="0">Sans compression</option><option value="1">Rapide</option><option value="5">Normal</option><option value="9">Maximum</option></select></label></div>
+    <div className="extract-grid"><label className="field">Mot de passe (facultatif)<input type="password" autoComplete="new-password" disabled={busy} value={password} onChange={e=>setPassword(e.target.value)}/></label>
+      <label className="field">Confirmer le mot de passe<input type="password" autoComplete="new-password" disabled={busy} value={passwordConfirm} onChange={e=>setPasswordConfirm(e.target.value)}/></label></div>
+    {password&&<p className="fine-print">Chiffrement AES-256. En 7z, le nom des fichiers est également masqué ; en ZIP, les noms restent visibles.</p>}
+    {busy&&<div className="extract-progress" role="status"><div className="extract-progress-caption"><span>{progress.message||'Compression en cours…'}</span><strong>{progress.percent}%</strong></div><div className="extract-track"><div style={{width:`${progress.percent}%`}}/></div></div>}
+    {error&&<div role="alert" className="error-message">{error}</div>}
+    {result&&<div role="status" className="extract-success"><Icon name="check"/><strong>Archive créée et vérifiée</strong><p>{result.path}<br/>{bytes(result.bytes)}</p></div>}
+    <div className="extract-footer">{busy?<button className="toolbtn" disabled={cancelAsked} onClick={cancel}>{cancelAsked?'Annulation demandée…':'Annuler la compression'}</button>:<button className="toolbtn" onClick={onClose}>{result?'Fermer':'Annuler'}</button>}
+      {!busy&&!result&&<button className="toolbtn primary" onClick={launch}><Icon name="plus"/> Créer l'archive</button>}
+      {!busy&&result&&<button className="toolbtn primary" onClick={()=>{onClose();onCreated(result,true);}}><Icon name="folder-open"/> Ouvrir l'archive</button>}
+    </div>
+    <p className="fine-print">Aucun fichier source n'est modifié. Une archive existante n'est jamais écrasée automatiquement.</p>
+  </section></div>;
+}
+
 function ExtractionDialog({archive,selected,onClose,onFinished,defaultPassword}) {
   const [destination,setDestination]=useState(()=>archiveParentDirectory(archive.path));
   const [password,setPassword]=useState(defaultPassword||'');
@@ -175,6 +259,7 @@ export default function App(){
   const [menuOps,setMenuOps]=useState(['zip','7z','extractHere','extractFolder','open']);
   const [customBg,setCustomBg]=useState('');
   const [extractOpen,setExtractOpen]=useState(false);
+  const [createOpen,setCreateOpen]=useState(false);
   const [archivePassword,setArchivePassword]=useState('');
   const [passwordPending,setPasswordPending]=useState('');
   const [passwordRetry,setPasswordRetry]=useState(null);
@@ -221,7 +306,7 @@ export default function App(){
     const labels={create:'La création d’archives',add:'L’ajout de fichiers',extract:'L’extraction',test:'Le test d’intégrité',convert:'La conversion'};
     notify((labels[action]||'Cette fonction')+' sera développée lors des prochaines étapes.');
   }
-  function doAction(action){if(action==='open'){chooseArchive();return;}if(action==='extract'){openExtraction();return;}future(action);}
+  function doAction(action){if(action==='open'){chooseArchive();return;}if(action==='extract'){openExtraction();return;}if(action==='create'){setCreateOpen(true);return;}future(action);}
   function setImage(file){setCustomBg(URL.createObjectURL(file));setBg('custom');}
   const entries=useMemo(()=>archive?childrenOf(archive.files,folder).filter(f=>f.path.split('/').at(-1).toLocaleLowerCase('fr').includes(search.toLocaleLowerCase('fr'))):[],[archive,folder,search]);
   const folderTrail=folder?folder.split('/'):[];
@@ -269,6 +354,7 @@ export default function App(){
         {route==='settings'&&<Settings {...{bg,setBg,alpha,setAlpha,info,setInfo,menuOps,setMenuOps,setImage}}/>}
       </main></section>
     </div>
+    {createOpen&&<CreationDialog onClose={()=>setCreateOpen(false)} onCreated={(r,openNow=false)=>{if(openNow)loadArchive(r.path);else notify('Archive créée et vérifiée.');}}/>}
     {extractOpen&&archive&&<ExtractionDialog key={archive.path} archive={archive} selected={selected} defaultPassword={archivePassword} onClose={()=>setExtractOpen(false)} onFinished={r=>notify(`${r.extracted} fichier(s) extrait(s).`)}/>}
     <div className={'toast'+(toast?' show':'')} role="status" aria-live="polite">{toast}</div>
   </div>;

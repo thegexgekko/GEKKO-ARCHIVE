@@ -333,9 +333,205 @@ fn cancel_extraction(state:State<'_,ExtractState>)->Result<(),String>{
     if let Some(flag)=state.active.lock().map_err(|e|e.to_string())?.as_ref(){flag.store(true,Ordering::SeqCst);}
     Ok(())
 }
+
+// V0.3.0 : création ZIP / 7z, sans remplacement implicite des archives existantes.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateRequest {
+    source_paths: Vec<String>, destination: String, format: String,
+    level: u8, password: Option<String>,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateResult {path:String, bytes:u64}
+#[derive(Default)]
+struct CreateState {active:Mutex<Option<Arc<AtomicBool>>>}
+
+fn ensure_source_tree_safe(path:&Path)->Result<(),String>{
+    let meta=fs::symlink_metadata(path).map_err(|e|format!("Source inaccessible : {e}"))?;
+    if meta.file_type().is_symlink()||is_reparse(&meta){
+        return Err(format!("Lien ou redirection dans la source : {}",path.display()));
+    }
+    if meta.is_file(){return Ok(());}
+    if !meta.is_dir(){return Err(format!("Type de fichier non pris en charge : {}",path.display()));}
+    for child in fs::read_dir(path).map_err(|e|format!("Lecture du dossier impossible : {e}"))?{
+        let child=child.map_err(|e|e.to_string())?;
+        ensure_source_tree_safe(&child.path())?;
+    }
+    Ok(())
+}
+
+fn validate_create(req:&CreateRequest)->Result<(PathBuf,PathBuf,Vec<String>),String>{
+    let kind=req.format.to_ascii_lowercase();
+    if !matches!(kind.as_str(),"zip"|"7z"){return Err("Formats de création disponibles : ZIP et 7z.".into());}
+    if !matches!(req.level,0|1|5|9){return Err("Niveau de compression invalide.".into());}
+    if req.source_paths.is_empty(){return Err("Sélectionne d'abord les fichiers ou un dossier à compresser.".into());}
+    if req.source_paths.len()>10000{return Err("Trop de fichiers sélectionnés.".into());}
+    let destination=PathBuf::from(req.destination.trim());
+    let ext=destination.extension().and_then(|e|e.to_str()).unwrap_or("");
+    if !ext.eq_ignore_ascii_case(&kind){return Err(format!("L'archive de sortie doit se terminer par .{kind}."));}
+    let name=destination.file_name().and_then(|n|n.to_str()).ok_or("Nom de destination invalide.")?;
+    if name.starts_with('.') || (name.contains('\r') || name.contains('\n')){return Err("Nom de l'archive invalide.".into());}
+    if destination.exists(){return Err("Cette archive existe déjà. Choisis un autre nom : aucun remplacement automatique.".into());}
+    let parent=destination.parent().filter(|p|!p.as_os_str().is_empty()).ok_or("Choisis un dossier de destination valide.")?;
+    let parent=fs::canonicalize(parent).map_err(|e|format!("Dossier de sortie inaccessible : {e}"))?;
+    if !parent.is_dir(){return Err("La destination doit être un dossier.".into());}
+    let destination=parent.join(name);
+    let mut common_parent=None;
+    let mut args=Vec::new();
+    let mut seen=HashSet::new();
+    for source in &req.source_paths {
+        let path=fs::canonicalize(source).map_err(|e|format!("Source inaccessible ({source}) : {e}"))?;
+        ensure_source_tree_safe(&path)?;
+        if path==destination || (path.is_dir() && destination.starts_with(&path)){
+            return Err("L'archive de sortie ne peut pas être placée dans le dossier source sélectionné.".into());
+        }
+        let dir=path.parent().ok_or("Source sans dossier parent.")?.to_path_buf();
+        if let Some(ref root)=common_parent {
+            if *root!=dir{return Err("Pour sélectionner plusieurs fichiers, utilise un même dossier source. Pour réunir plusieurs dossiers, sélectionne leur dossier parent.".into());}
+        }else{common_parent=Some(dir);}
+        let filename=path.file_name().and_then(|v|v.to_str()).ok_or("Nom de fichier non compatible.")?;
+        if filename.contains('\r') || filename.contains('\n'){return Err("Nom de fichier contenant un saut de ligne non pris en charge.".into());}
+        if !seen.insert(filename.to_lowercase()){return Err(format!("Nom de source en double : {filename}"));}
+        // Un chemin relatif explicite évite l'interprétation de '-' ou '@' en option 7-Zip.
+        args.push(format!(".\\{filename}"));
+    }
+    Ok((common_parent.ok_or("Aucune source.")?,destination,args))
+}
+
+// Fichier temporaire dans le dossier de destination : aucune archive incomplète publiée.
+struct TemporaryArchive(PathBuf);
+impl Drop for TemporaryArchive{fn drop(&mut self){let _=fs::remove_file(&self.0);}}
+fn compression_progress<R:Read>(mut input:R,app:AppHandle){
+    let mut buf=[0u8;8192];let mut token=Vec::new();
+    while let Ok(n)=input.read(&mut buf){if n==0{break;}
+        for b in &buf[..n]{
+            if *b==b'\r'||*b==b'\n'{
+                let line=String::from_utf8_lossy(&token);
+                for word in line.split_whitespace(){
+                    if let Some(p)=word.strip_suffix('%').and_then(|v|v.parse::<u8>().ok()){
+                        let _=app.emit("gekko-compression-progress",Progress{phase:"compression".into(),percent:p.min(100).saturating_mul(88)/100,message:"Compression en cours…".into()});
+                        break;
+                    }
+                }
+                token.clear();
+            }else if token.len()<4096{token.push(*b);}
+        }
+    }
+}
+fn emit_compression(app:&AppHandle,phase:&str,percent:u8,message:&str){
+    let _=app.emit("gekko-compression-progress",Progress{phase:phase.into(),percent,message:message.into()});
+}
+fn create_worker(app:AppHandle,req:CreateRequest,cancel:Arc<AtomicBool>)->Result<CreateResult,String>{
+    let (base,destination,source_names)=validate_create(&req)?;
+    let engine=find_engine()?;
+    let kind=req.format.to_ascii_lowercase();
+    let stamp=SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e|e.to_string())?.as_nanos();
+    let temporary=TemporaryArchive(destination.parent().ok_or("Dossier de sortie invalide.")?
+        .join(format!(".gekko-create-{}-{stamp}.{kind}",std::process::id())));
+    if temporary.0.exists(){return Err("Un fichier de travail existe déjà, recommence l'opération.".into());}
+    emit_compression(&app,"préparation",0,"Préparation des fichiers…");
+    if cancel.load(Ordering::SeqCst){return Err("Compression annulée.".into());}
+    let mut cmd=Command::new(&engine);
+    cmd.current_dir(&base).arg("a").arg(format!("-t{kind}")).arg(format!("-mx={}",req.level))
+        .arg("-y").arg("-sccUTF-8").arg("-scsUTF-8").arg("-spd")
+        .arg("-bsp1").arg("-bb0").arg("-bso0").arg("-bse1");
+    if let Some(pass)=req.password.as_deref().filter(|p|!p.is_empty()){
+        cmd.arg(format!("-p{pass}"));
+        if kind=="7z" {cmd.arg("-mhe=on");}
+        else {cmd.arg("-mem=AES256");}
+    }
+    cmd.arg("--").arg(&temporary.0).args(&source_names);
+    let mut child=cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped())
+        .spawn().map_err(|e|format!("Démarrage de 7-Zip impossible : {e}"))?;
+    let stdout=child.stdout.take().ok_or("Progression du moteur inaccessible.")?;
+    let stderr=child.stderr.take().ok_or("Erreurs du moteur inaccessibles.")?;
+    let progress_app=app.clone();
+    let progress_thread=std::thread::spawn(move||compression_progress(stdout,progress_app));
+    let error_thread=std::thread::spawn(move||{
+        let mut output=String::new();
+        // Toujours vider stderr pour ne pas bloquer le processus si 7-Zip
+        // écrit beaucoup de diagnostics ; limiter uniquement le message rendu.
+        let _=std::io::BufReader::new(stderr).read_to_string(&mut output);
+        output
+    });
+    let status=loop{
+        if cancel.load(Ordering::SeqCst){let _=child.kill();break child.wait().map_err(|e|e.to_string())?;}
+        match child.try_wait().map_err(|e|e.to_string())?{
+            Some(code)=>break code,
+            None=>std::thread::sleep(Duration::from_millis(100)),
+        }
+    };
+    let _=progress_thread.join();let errors=error_thread.join().unwrap_or_default();
+    if cancel.load(Ordering::SeqCst){return Err("Compression annulée. Aucune archive créée.".into());}
+    if !status.success(){return Err(format!("Échec de compression 7-Zip ({status}) : {}",errors.chars().take(500).collect::<String>()));}
+    if !temporary.0.is_file(){return Err("Le moteur n'a pas produit de fichier d'archive.".into());}
+    emit_compression(&app,"vérification",90,"Vérification de la nouvelle archive…");
+    let mut test=Command::new(&engine);
+    test.arg("t").arg("-y").arg("-bsp0").arg("-bso0").arg("-bse0");
+    if let Some(pass)=req.password.as_deref().filter(|p|!p.is_empty()){test.arg(format!("-p{pass}"));}
+    let mut verify=test.arg("--").arg(&temporary.0).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+        .spawn().map_err(|e|format!("Vérification impossible : {e}"))?;
+    let check=loop{
+        if cancel.load(Ordering::SeqCst){let _=verify.kill();break verify.wait().map_err(|e|e.to_string())?;}
+        match verify.try_wait().map_err(|e|e.to_string())?{
+            Some(code)=>break code,
+            None=>std::thread::sleep(Duration::from_millis(100)),
+        }
+    };
+    if cancel.load(Ordering::SeqCst){return Err("Compression annulée. Aucune archive créée.".into());}
+    if !check.success(){return Err("L'archive créée n'a pas passé le test d'intégrité 7-Zip. Elle ne sera pas conservée.".into());}
+    emit_compression(&app,"finalisation",96,"Enregistrement de l'archive…");
+    // create_new interdit tout écrasement, y compris si une autre application
+    // a créé un fichier au même emplacement pendant la compression.
+    let mut output=fs::OpenOptions::new().write(true).create_new(true).open(&destination)
+        .map_err(|e|format!("Impossible de créer l'archive finale (fichier peut-être déjà présent) : {e}"))?;
+    let copy_result=(||->std::io::Result<u64>{
+        let mut source=fs::File::open(&temporary.0)?;
+        let bytes=std::io::copy(&mut source,&mut output)?;
+        output.sync_all()?;
+        Ok(bytes)
+    })();
+    drop(output);
+    let bytes=match copy_result{Ok(value)=>value,Err(e)=>{
+        let _=fs::remove_file(&destination);
+        return Err(format!("Écriture de l'archive impossible : {e}"));
+    }};
+    emit_compression(&app,"terminé",100,"Archive créée et vérifiée.");
+    Ok(CreateResult{path:destination.to_string_lossy().into_owned(),bytes})
+}
+#[tauri::command]
+async fn create_archive(app:AppHandle,state:State<'_,CreateState>,req:CreateRequest)->Result<CreateResult,String>{
+    let flag=Arc::new(AtomicBool::new(false));
+    {
+        let mut lock=state.active.lock().map_err(|e|e.to_string())?;
+        if lock.is_some(){return Err("Une compression est déjà en cours.".into());}
+        *lock=Some(flag.clone());
+    }
+    let result=tauri::async_runtime::spawn_blocking(move||create_worker(app,req,flag)).await
+        .map_err(|e|format!("Erreur de tâche : {e}"));
+    *state.active.lock().map_err(|e|e.to_string())?=None;
+    result?
+}
+#[tauri::command]
+fn cancel_compression(state:State<'_,CreateState>)->Result<(),String>{
+    if let Some(flag)=state.active.lock().map_err(|e|e.to_string())?.as_ref(){flag.store(true,Ordering::SeqCst);}
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn create_format_validation(){
+        let req=CreateRequest{source_paths:vec![],destination:"Archive.rar".into(),format:"rar".into(),level:5,password:None};
+        assert!(validate_create(&req).unwrap_err().contains("ZIP et 7z"));
+    }
+    #[test]
+    fn source_without_files_rejected(){
+        let req=CreateRequest{source_paths:vec![],destination:"Archive.zip".into(),format:"zip".into(),level:5,password:None};
+        assert!(validate_create(&req).unwrap_err().contains("Sélectionne"));
+    }
     #[test]fn listing(){let s="Path = a.zip\nType = zip\n\n----------\nPath = docs/\nFolder = +\n\nPath = docs/a.txt\nSize = 42\nPacked Size = 19\n\n";let v=parse_listing(s);assert_eq!(v.len(),2);assert_eq!(v[1].size,42);}
     #[test]fn refuse_traversal(){for s in ["../foo","C:/foo","/etc/file","AUX","folder/COM1.txt","file:stream","x/../y","x\\..\\y"]{assert!(safe_member(s).is_err(),"{s}");}}
     #[test]fn select_nested(){let all=vec![ArchiveFile{path:"a/b.txt".into(),size:3,packed_size:None,modified:String::new(),is_dir:false,is_link:false,link_reason:String::new()}];assert_eq!(selected_files(&all,&["a".into()]).unwrap().len(),1);}
@@ -399,6 +595,6 @@ mod tests{
 
 }
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run(){tauri::Builder::default().plugin(tauri_plugin_dialog::init()).manage(ExtractState::default())
-    .invoke_handler(tauri::generate_handler![list_archive,preview_extraction,extract_archive,cancel_extraction])
+pub fn run(){tauri::Builder::default().plugin(tauri_plugin_dialog::init()).manage(ExtractState::default()).manage(CreateState::default())
+    .invoke_handler(tauri::generate_handler![list_archive,preview_extraction,extract_archive,cancel_extraction,create_archive,cancel_compression])
     .run(tauri::generate_context!()).expect("Impossible de lancer GEKKO ARCHIVE");}

@@ -2,12 +2,13 @@
 
 Utilitaire d'archives pour **Windows 11**, développé avec **React + Tauri 2 + Rust**. Projet indépendant de GEKKO ULTIMATE STUDIO.
 
-## État — V0.2.4 Alpha
+## État — V0.3.0 Alpha
 
 - Ouverture et exploration d'archives ZIP, 7z, RAR et TAR : testées sur Windows 11.
 - Extraction réelle : extraction RAR d'un fichier EXE confirmée après le correctif V0.2.4.
 - Sélection des fichiers, destination proposée automatiquement (dossier de l'archive), choix de dossier, gestion des conflits, mots de passe, progression et annulation : fonctionnalités implémentées, tests complémentaires nécessaires.
-- Compression / création, conversion, menu contextuel Windows 11 : non encore opérationnels.
+- Création ZIP / 7z : première implémentation disponible (fichiers ou dossier, niveau de compression, AES-256, progression, annulation, vérification avant enregistrement), à valider sous Windows 11.
+- Ajout à une archive existante, conversion, menu contextuel Windows 11 : non encore opérationnels.
 
 ## Démarrage en développement (Windows 11)
 
