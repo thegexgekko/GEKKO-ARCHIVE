@@ -1,0 +1,28 @@
+# Node / Vite
+node_modules/
+dist/
+.vite/
+*.log
+npm-debug.log*
+
+# Rust / Tauri
+src-tauri/target/
+**/target/
+
+# Moteur tiers non suivi dans les sources
+src-tauri/resources/7z.exe
+src-tauri/resources/7z.dll
+src-tauri/resources/*.dll
+src-tauri/resources/*.exe
+
+# Fichiers locaux
+*.zip
+*.7z
+*.rar
+*.tar
+*.tmp
+*.bak
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

@@ -1,0 +1,40 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "GEKKO ARCHIVE",
+  "version": "0.2.4",
+  "identifier": "fr.gekkosoftware.archive",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "GEKKO ARCHIVE",
+        "width": 1380,
+        "height": 850,
+        "minWidth": 950,
+        "minHeight": 620,
+        "decorations": false,
+        "transparent": false,
+        "backgroundColor": "#0b101b"
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "nsis"
+    ],
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.ico"
+    ]
+  }
+}
