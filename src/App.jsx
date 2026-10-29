@@ -65,11 +65,11 @@ function childrenOf(files, current) {
 function AppButton({action,primary=false,onClick}) {
   return <button className={`toolbtn${primary?' primary':''}`} onClick={onClick}><Icon name={action.icon}/>{action.text}</button>;
 }
-function Settings({bg,setBg,alpha,setAlpha,info,setInfo,menuOps,setMenuOps,setImage}) {
+function Settings({bg,setBg,alpha,setAlpha,info,setInfo,menuOps,setMenuOps,setImage,menuReady,menuStatus}) {
   const fileInput=useRef(null);
   return <div className="page-inner">
     <div className="crumbs">Accueil / <strong>Paramètres</strong></div>
-    <div className="workspace-heading"><div><h1>Personnalisation</h1><p>Apparence et commandes préparées pour Windows 11</p></div></div>
+    <div className="workspace-heading"><div><h1>Personnalisation</h1><p>Apparence et commandes Windows 11</p></div></div>
     <section className="setting-section"><h2>Apparence</h2>
       <div className="setting-row"><div><label htmlFor="bgSelector">Fond de l'interface</label><small>Choisir une ambiance propre à GEKKO ARCHIVE</small></div>
         <select id="bgSelector" value={bg} onChange={e=>setBg(e.target.value)}><option value="default">Bleu & cuivre</option><option value="amber">Or nocturne</option><option value="blue">Bleu profond</option><option value="custom">Image personnelle</option></select></div>
@@ -78,8 +78,9 @@ function Settings({bg,setBg,alpha,setAlpha,info,setInfo,menuOps,setMenuOps,setIm
         <input ref={fileInput} className="hidden" type="file" accept="image/*" onChange={e=>{if(e.target.files?.[0])setImage(e.target.files[0]);e.target.value='';}}/></div>
       <div className="setting-row"><div><label htmlFor="infoToggle">Panneau d'informations</label><small>Affiché sous le contenu d'une archive</small></div><input id="infoToggle" type="checkbox" checked={info} onChange={e=>setInfo(e.target.checked)}/></div>
     </section>
-    <section className="setting-section"><h2>Menu contextuel Windows 11</h2><p>Les choix sont désormais mémorisés. Le pont de lancement est testable ; le sous-menu natif Windows 11 n’est pas encore installé.</p>
-      {menuLabels.map(([id,label])=><div className="setting-row" key={id}><label htmlFor={'menu_'+id}>{label}</label><input id={'menu_'+id} type="checkbox" checked={menuOps.includes(id)} onChange={e=>setMenuOps(current=>e.target.checked?[...current,id]:current.filter(x=>x!==id))}/></div>)}
+    <section className="setting-section"><h2>Menu contextuel Windows 11</h2><p>Choisis les commandes qui apparaissent au clic droit dans l’Explorateur Windows. Les changements sont enregistrés localement et pris en compte à l’ouverture du menu.</p>
+      {menuLabels.map(([id,label])=><div className="setting-row" key={id}><label htmlFor={'menu_'+id}>{label}</label><input id={'menu_'+id} type="checkbox" disabled={!menuReady} checked={menuOps.includes(id)} onChange={e=>setMenuOps(current=>e.target.checked?[...current,id]:current.filter(x=>x!==id))}/></div>)}
+      <p role="status" aria-live="polite">{menuStatus}</p>
     </section>
   </div>;
 }
@@ -422,10 +423,34 @@ export default function App(){
   const [shellCreate,setShellCreate]=useState(null);
   const [shellJob,setShellJob]=useState(null);
   const shellBusy=useRef(false);
+  const [menuReady,setMenuReady]=useState(false);
+  const [menuStatus,setMenuStatus]=useState('Chargement des préférences Windows…');
+  // La configuration native est la référence : évite d'écraser les préférences
+  // existantes avec les valeurs initiales React lors du démarrage.
   useEffect(()=>{
-    try{localStorage.setItem('gekko.archive.context.commands',JSON.stringify(menuOps));}
-    catch{ /* Les réglages visuels restent utilisables. */ }
-  },[menuOps]);
+    let live=true;
+    invoke('get_context_menu_commands').then(saved=>{
+      if(!live)return;
+      if(Array.isArray(saved))setMenuOps(menuLabels.map(([id])=>id).filter(id=>saved.includes(id)));
+      setMenuReady(true);
+      setMenuStatus('Préférences prêtes.');
+    }).catch(err=>{
+      if(!live)return;
+      setMenuStatus('Impossible de lire les préférences Windows : '+String(err));
+    });
+    return ()=>{live=false;};
+  },[]);
+  useEffect(()=>{
+    if(!menuReady)return;
+    setMenuStatus('Enregistrement des commandes du clic droit…');
+    const timer=setTimeout(()=>{
+      invoke('set_context_menu_commands',{commands:menuOps}).then(()=>{
+        try{localStorage.setItem('gekko.archive.context.commands',JSON.stringify(menuOps));}catch{}
+        setMenuStatus('Commandes enregistrées. Rouvre le menu du clic droit pour voir le changement.');
+      }).catch(err=>setMenuStatus('Enregistrement impossible : '+String(err)));
+    },200);
+    return ()=>clearTimeout(timer);
+  },[menuOps,menuReady]);
   const [customBg,setCustomBg]=useState('');
   const [extractOpen,setExtractOpen]=useState(false);
   const [createOpen,setCreateOpen]=useState(false);
@@ -771,7 +796,7 @@ export default function App(){
             {info&&<div className="info-panel"><div className="stat"><small>Format</small><strong>{archive.format}</strong></div><div className="stat"><small>Taille de l'archive</small><strong>{bytes(archive.bytes)}</strong></div><div className="stat"><small>Éléments</small><strong>{archive.files.length}</strong></div><div className="stat"><small>Sélection</small><strong>{selected.length} élément(s)</strong></div></div>}
           </>}
         </div>}
-        {route==='settings'&&<Settings {...{bg,setBg,alpha,setAlpha,info,setInfo,menuOps,setMenuOps,setImage}}/>}
+        {route==='settings'&&<Settings {...{bg,setBg,alpha,setAlpha,info,setInfo,menuOps,setMenuOps,setImage,menuReady,menuStatus}}/>}
       </main></section>
     </div>
     {shellJob&&<div className="extract-overlay"><section className="extract-modal" role="dialog" aria-modal="true" aria-label="Opération Windows en cours"><div className="extract-header"><Icon name="archive"/><h2>{shellJob.kind==='compression'?'Compression automatique':'Extraction automatique'}</h2></div><div className="extract-progress" role="status"><div className="extract-progress-caption"><span>{shellJob.message}</span><strong>{shellJob.percent}%</strong></div><div className="extract-track"><div style={{width:`${shellJob.percent}%`}}/></div></div><div className="extract-footer"><button className="toolbtn" disabled={shellJob.cancelAsked} onClick={cancelShellJob}>{shellJob.cancelAsked?'Annulation demandée…':'Annuler'}</button></div></section></div>}

@@ -8,7 +8,7 @@
   xmlns:desktop5="http://schemas.microsoft.com/appx/manifest/desktop/windows10/5"
   IgnorableNamespaces="uap uap10 rescap com desktop4 desktop5">
   <Identity Name="GEKKOSoftware.GEKKOArchiveShell" Publisher="CN=GEKKO-Archive-Dev"
-    Version="0.6.0.1" ProcessorArchitecture="x64" />
+    Version="0.6.0.2" ProcessorArchitecture="x64" />
   <Properties>
     <DisplayName>GEKKO ARCHIVE — Menu contextuel</DisplayName>
     <PublisherDisplayName>GEKKO SOFTWARE</PublisherDisplayName>
@@ -30,11 +30,11 @@
         <com:Extension Category="windows.comServer">
           <com:ComServer>
             <com:SurrogateServer DisplayName="GEKKO ARCHIVE commands">
-            <com:Class Id="348348C7-F21A-4D5F-8E16-35C9F55212D4" Path="GEKKOArchiveContextV0601.dll" ThreadingModel="STA" />
-            <com:Class Id="F69BBECE-46D2-4B63-A928-FDCDEFDE9B61" Path="GEKKOArchiveContextV0601.dll" ThreadingModel="STA" />
-            <com:Class Id="70C82349-D338-4980-8C07-BFA70162B297" Path="GEKKOArchiveContextV0601.dll" ThreadingModel="STA" />
-            <com:Class Id="B3746AF8-1DD0-439A-A4CD-0A8B96BDEBFD" Path="GEKKOArchiveContextV0601.dll" ThreadingModel="STA" />
-            <com:Class Id="3C811319-10B0-40E2-A0F5-678FEFB61917" Path="GEKKOArchiveContextV0601.dll" ThreadingModel="STA" />
+            <com:Class Id="348348C7-F21A-4D5F-8E16-35C9F55212D4" Path="GEKKOArchiveContextV0602.dll" ThreadingModel="STA" />
+            <com:Class Id="F69BBECE-46D2-4B63-A928-FDCDEFDE9B61" Path="GEKKOArchiveContextV0602.dll" ThreadingModel="STA" />
+            <com:Class Id="70C82349-D338-4980-8C07-BFA70162B297" Path="GEKKOArchiveContextV0602.dll" ThreadingModel="STA" />
+            <com:Class Id="B3746AF8-1DD0-439A-A4CD-0A8B96BDEBFD" Path="GEKKOArchiveContextV0602.dll" ThreadingModel="STA" />
+            <com:Class Id="3C811319-10B0-40E2-A0F5-678FEFB61917" Path="GEKKOArchiveContextV0602.dll" ThreadingModel="STA" />
             </com:SurrogateServer>
           </com:ComServer>
         </com:Extension>

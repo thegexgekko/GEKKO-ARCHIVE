@@ -1,0 +1,30 @@
+GEKKO ARCHIVE V0.6.1 Alpha - Personnalisation du menu Windows 11
+
+Correctif pour le projet V0.6.0 Alpha validé. L'extension MSIX installée
+actuellement doit être en version 0.6.0.1. Les commandes Windows validées
+et les fonctions ZIP/7z/RAR ne sont pas modifiées.
+
+INSTALLATION
+1. Fermer GEKKO ARCHIVE et sa console.
+2. Extraire ce ZIP à la racine du projet, en conservant l'arborescence.
+3. Lancer ACTUALISER_PREFERENCES_MENU_V061.bat ; confirmer ACTUALISER.
+   La DLL native est recompilée et MSIX 0.6.0.2 réutilise le certificat
+   de test déjà accepté ; aucun nouveau certificat n'est créé.
+4. Redémarrer GEKKO ARCHIVE avec LANCER_GEKKO_ARCHIVE.bat : Rust recompile.
+5. Paramètres > Menu contextuel Windows 11 : décocher par ex.
+   « Compresser en ZIP ». Rouvrir le clic droit d'un fichier Windows.
+   La commande doit disparaître ; la recocher doit la rétablir.
+
+Les préférences sont écrites dans :
+%LOCALAPPDATA%\GEKKO_ARCHIVE\context_menu.ini
+L'extension COM lit ce fichier au moment de décider si une commande
+est visible. Par défaut, les cinq commandes sont actives.
+Aucune connexion Internet et aucun redémarrage Windows nécessaires.
+
+RETOUR ARRIÈRE
+Si nécessaire, revenir à l'ancienne version à partir des sources V0.6.0
+et du package MSIX signé correspondant, ou utiliser le désinstallateur
+existant du menu Windows 11. Ne pas effacer manuellement les certificats.
+
+Limites : compilation et fonctionnement Windows 11 à valider localement.
+Aucun changement GitHub/Notion avant les tests utilisateur.

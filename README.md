@@ -36,6 +36,14 @@ Le programme de développement utilise les fichiers `src-tauri/resources/7z.exe`
 
 Après lancement de GEKKO ARCHIVE, glisser un fichier ou dossier sur `TESTER_PONT_WINDOWS_V050.bat` permet de choisir l'une des cinq commandes. Le script appelle `ENVOYER_PONT_WINDOWS_V050.ps1` pour transmettre la demande à l'instance déjà ouverte au moyen d'une file locale. Aucun élément de menu contextuel Windows n'est installé par ces scripts. `RECOMPILER_PONT_WINDOWS_V050.bat` sert uniquement à reconstruire le paquet Rust en cas de backend obsolète.
 
+## V0.6.1 Alpha — personnalisation du menu contextuel Windows 11
+
+- Activation et désactivation individuelle des cinq commandes depuis **Paramètres > Menu contextuel Windows 11**, validées sur Windows 11.
+- Enregistrement local dans `%LOCALAPPDATA%\GEKKO_ARCHIVE\context_menu.ini`; l'extension C++ lit ces préférences au moment d'afficher le menu. Aucun redémarrage ou compilation pour changer les cases.
+- Package MSIX de l'extension : **0.6.0.2**, mis à jour avec `ACTUALISER_PREFERENCES_MENU_V061.bat`. Utilise le certificat de développement local déjà accepté (certificat et binaires non présents dans GitHub).
+- Les moteurs d'archives, le pont Windows V0.5.0 et les autres fonctions validées restent inchangés.
+- **À venir :** installateur complet et désinstallation propre ; le script de mise à jour actuel ne remplace pas un installateur utilisateur final.
+
 ## Structure
 
 - `src/` : interface React, illustrations GEKKO ARCHIVE.

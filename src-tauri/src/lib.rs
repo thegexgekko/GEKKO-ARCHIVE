@@ -1085,7 +1085,70 @@ fn ensure_shell_extract_folder(archive_path:String)->Result<String,String>{
     Ok(verified.to_string_lossy().into_owned())
 }
 
+// GEKKO ARCHIVE V0.6.1 : préférences du menu Windows dans un seul fichier
+// local lisible par le composant COM. Absence du fichier = 5 commandes actives.
+const CONTEXT_MENU_ACTIONS:[&str;5]=["open","zip","7z","extractHere","extractFolder"];
+fn context_menu_prefs_path()->Result<PathBuf,String>{
+    let base=std::env::var_os("LOCALAPPDATA")
+        .filter(|s|!s.is_empty()).ok_or("LOCALAPPDATA inaccessible.")?;
+    Ok(PathBuf::from(base).join("GEKKO_ARCHIVE").join("context_menu.ini"))
+}
+#[tauri::command]
+fn get_context_menu_commands()->Result<Option<Vec<String>>,String>{
+    let file=context_menu_prefs_path()?;
+    let value=match fs::read(&file){
+        Ok(b)=>b,
+        Err(e) if e.kind()==std::io::ErrorKind::NotFound=>return Ok(None),
+        Err(e)=>return Err(format!("Lecture des préférences : {e}")),
+    };
+    if value.len()>4096{return Err("Fichier de préférences anormalement volumineux.".into());}
+    let text=std::str::from_utf8(&value).map_err(|_|"Préférences non UTF-8.")?;
+    let mut enabled=Vec::new();
+    for key in CONTEXT_MENU_ACTIONS {
+        let line=format!("{key}=");
+        let values:Vec<&str>=text.lines().filter_map(|l|l.trim().strip_prefix(&line)).collect();
+        if values.len()!=1{return Err(format!("Préférence manquante ou dupliquée : {key}"));}
+        match values[0].trim(){
+            "1"=>enabled.push(key.to_string()),
+            "0"=>{},
+            _=>return Err(format!("Préférence invalide : {key}")),
+        }
+    }
+    Ok(Some(enabled))
+}
+#[tauri::command]
+fn set_context_menu_commands(commands:Vec<String>)->Result<(),String>{
+    if commands.len()>5 || commands.iter().any(|x|!CONTEXT_MENU_ACTIONS.contains(&x.as_str())){
+        return Err("Liste de commandes Windows invalide.".into());
+    }
+    let mut unique=HashSet::new();
+    if commands.iter().any(|x|!unique.insert(x.as_str())){
+        return Err("Commande Windows dupliquée.".into());
+    }
+    let path=context_menu_prefs_path()?;
+    let dir=path.parent().ok_or("Répertoire de préférences introuvable.")?;
+    fs::create_dir_all(dir).map_err(|e|format!("Dossier des préférences : {e}"))?;
+    let mut text=String::from("[ContextMenu]\n");
+    for key in CONTEXT_MENU_ACTIONS{
+        text.push_str(&format!("{key}={}\n",if unique.contains(key){1}else{0}));
+    }
+    // Une écriture temporaire évite qu'Explorer lise des préférences tronquées.
+    let stamp=SystemTime::now().duration_since(UNIX_EPOCH)
+        .map_err(|e|e.to_string())?.as_nanos();
+    let tmp=dir.join(format!("context_menu.{stamp}.tmp"));
+    let result=(||->Result<(),String>{
+        let mut out=fs::OpenOptions::new().write(true).create_new(true).open(&tmp)
+            .map_err(|e|format!("Préparation des préférences : {e}"))?;
+        out.write_all(text.as_bytes()).map_err(|e|e.to_string())?;
+        out.sync_all().map_err(|e|e.to_string())?;
+        fs::rename(&tmp,&path).map_err(|e|format!("Enregistrement des préférences : {e}"))?;
+        Ok(())
+    })();
+    if result.is_err(){let _=fs::remove_file(&tmp);}
+    result
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run(){tauri::Builder::default().plugin(tauri_plugin_dialog::init()).plugin(tauri_plugin_drag::init()).manage(DragExportState::default()).manage(ExtractState::default()).manage(CreateState::default()).manage(ConvertState::default()).manage(AddState::default())
-    .invoke_handler(tauri::generate_handler![list_archive,preview_extraction,extract_archive,cancel_extraction,create_archive,cancel_compression,convert_archive,cancel_conversion,add_to_archive,cancel_add,prepare_drag_export,get_shell_launch,ensure_shell_extract_folder])
+    .invoke_handler(tauri::generate_handler![list_archive,preview_extraction,extract_archive,cancel_extraction,create_archive,cancel_compression,convert_archive,cancel_conversion,add_to_archive,cancel_add,prepare_drag_export,get_shell_launch,ensure_shell_extract_folder,get_context_menu_commands,set_context_menu_commands])
     .run(tauri::generate_context!()).expect("Impossible de lancer GEKKO ARCHIVE");}

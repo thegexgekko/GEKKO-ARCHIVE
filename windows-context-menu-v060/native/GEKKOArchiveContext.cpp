@@ -59,6 +59,26 @@ static const char* Token(Action a) {
     default: return "extractFolder";
     }
 }
+// Les préférences sont propres à l'utilisateur. Le menu reste fonctionnel si
+// le fichier n'a pas encore été créé par la nouvelle interface.
+static const wchar_t* ConfigKey(Action a) {
+    switch(a){
+    case Action::Open: return L"open";
+    case Action::Zip: return L"zip";
+    case Action::SevenZip: return L"7z";
+    case Action::ExtractHere: return L"extractHere";
+    default: return L"extractFolder";
+    }
+}
+static bool CommandEnabled(Action a){
+    PWSTR local=nullptr;
+    if(FAILED(SHGetKnownFolderPath(FOLDERID_LocalAppData,0,nullptr,&local)) || !local)
+        return true; // Aucun blocage si le profil Windows n'est pas accessible.
+    std::wstring config(local);
+    CoTaskMemFree(local);
+    config += L"\\GEKKO_ARCHIVE\\context_menu.ini";
+    return GetPrivateProfileIntW(L"ContextMenu",ConfigKey(a),1,config.c_str())!=0;
+}
 static bool IsArchive(const std::wstring& name) {
     const wchar_t* ext = PathFindExtensionW(name.c_str());
     static const wchar_t* allowed[] = { L".zip",L".7z",L".rar",L".tar",L".gz",L".bz2",L".xz",L".zst",L".cab",L".iso",L".wim",L".arj" };
@@ -202,6 +222,7 @@ public:
     }
     HRESULT STDMETHODCALLTYPE GetState(IShellItemArray* items, BOOL, EXPCMDSTATE* state) override {
         if (!state) return E_POINTER;
+        if (!CommandEnabled(action_)) { *state=ECS_HIDDEN; return S_OK; }
         // Le Shell peut interroger GetState sans fournir une selection exploitable.
         // Dans ce cas, ne PAS cacher silencieusement une commande de compression.
         // ZIP et 7z acceptent tout fichier : restent donc visibles sans I/O.
@@ -225,6 +246,7 @@ public:
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE Invoke(IShellItemArray* items, IBindCtx*) override {
+        if (!CommandEnabled(action_)) return HRESULT_FROM_WIN32(ERROR_ACCESS_DISABLED_BY_POLICY);
         std::wstring path; bool folder = false;
         HRESULT hr = Selection(items, path, folder);
         if (FAILED(hr)) return hr;
