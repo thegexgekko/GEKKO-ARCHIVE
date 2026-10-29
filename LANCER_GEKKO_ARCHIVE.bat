@@ -8,5 +8,9 @@ if not exist "node_modules\" (
   echo Installation initiale des dependances de developpement...
   call npm install --no-audit --no-fund || (pause & exit /b 1)
 )
+if not exist "node_modules\@crabnebula\tauri-plugin-drag\package.json" (
+  echo Installation ponctuelle du composant libre de glisser-deposer natif...
+  call npm install --no-audit --no-fund || (pause & exit /b 1)
+)
 call npm run tauri dev
 if errorlevel 1 pause

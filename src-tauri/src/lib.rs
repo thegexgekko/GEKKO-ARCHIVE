@@ -865,7 +865,113 @@ mod tests{
     }
 
 }
+
+// V0.4.3 — Préparation de fichiers réels pour glisser des entrées d'archive
+// vers l'Explorateur Windows. Seules les entrées demandées sont décompressées.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DragExportRequest {
+    archive_path: String,
+    selected_paths: Vec<String>,
+    password: Option<String>,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DragExportResult {
+    paths: Vec<String>,
+    icon_path: String,
+}
+#[derive(Default)]
+struct DragExportState {
+    staged: Mutex<Vec<PathBuf>>,
+    active: Mutex<Option<Arc<AtomicBool>>>,
+}
+impl Drop for DragExportState {
+    fn drop(&mut self) {
+        if let Ok(staged) = self.staged.get_mut() {
+            for p in staged.drain(..) { let _ = fs::remove_dir_all(p); }
+        }
+    }
+}
+fn drag_export_worker(app: AppHandle, req: DragExportRequest, cancelled: Arc<AtomicBool>) -> Result<(PathBuf, DragExportResult), String> {
+    if req.selected_paths.is_empty() || req.selected_paths.len() > 256 {
+        return Err("Sélectionne entre 1 et 256 éléments à glisser.".into());
+    }
+    // Validation identique à l'extraction déjà opérationnelle : contrôle des
+    // chemins membres, liens, doublons Windows et présence de la source.
+    let all = read_listing(Path::new(&req.archive_path), req.password.as_deref())?;
+    let _verified = selected_files(&all, &req.selected_paths)?;
+    if cancelled.load(Ordering::SeqCst) { return Err("Préparation remplacée par une nouvelle sélection.".into()); }
+    let mut stage = create_stage()?;
+    let destination = stage.0.to_string_lossy().into_owned();
+    let extract_req = ExtractRequest {
+        archive_path: req.archive_path,
+        destination,
+        selected_paths: req.selected_paths.clone(),
+        password: req.password,
+        policy: "skip".into(),
+        decisions: HashMap::new(),
+    };
+    // Réemploi du processus d'extraction sécurisé, sans aucune nouvelle
+    // écriture dans l'archive d'origine ni accès au dossier de destination.
+    let result = extract_worker(app, extract_req, cancelled.clone())?;
+    if cancelled.load(Ordering::SeqCst) { return Err("Préparation remplacée par une nouvelle sélection.".into()); }
+    if result.skipped != 0 { return Err("Éléments non préparés pour le glisser-déposer.".into()); }
+    let mut paths = Vec::new();
+    let mut names = HashSet::new();
+    for requested in &req.selected_paths {
+        let rel = safe_member(requested)?;
+        let path = stage.0.join(rel);
+        if !path.exists() { return Err(format!("Élément non extrait : {requested}")); }
+        // Explorer dépose chaque élément sous son nom simple. Deux entrées
+        // homonymes dans deux dossiers ne peuvent pas être glissées ensemble.
+        let leaf = path.file_name().ok_or("Nom de fichier invalide.")?
+            .to_string_lossy().to_lowercase();
+        if !names.insert(leaf) {
+            return Err("Deux fichiers sélectionnés portent le même nom. Glisse-les séparément.".into());
+        }
+        paths.push(path.to_string_lossy().into_owned());
+    }
+    // Une vraie icône Windows sur disque est requise pour le drag natif.
+    let icon = stage.0.join(".gekko-drag-icon.png");
+    fs::write(&icon, include_bytes!("../icons/icon.png"))
+        .map_err(|e| format!("Icône du glisser-déposer inaccessible : {e}"))?;
+    let data = DragExportResult { paths, icon_path: icon.to_string_lossy().into_owned() };
+    // TempStage s'autonettoie sur erreur ; après succès l'application prend
+    // possession de ce dossier jusqu'à sa fermeture.
+    let dir = std::mem::take(&mut stage.0);
+    Ok((dir, data))
+}
+#[tauri::command]
+async fn prepare_drag_export(
+    app: AppHandle, state: State<'_, DragExportState>, req: DragExportRequest
+) -> Result<DragExportResult, String> {
+    let flag = Arc::new(AtomicBool::new(false));
+    {
+        let mut active = state.active.lock().map_err(|e|e.to_string())?;
+        if let Some(previous) = active.replace(flag.clone()) {
+            previous.store(true, Ordering::SeqCst);
+        }
+    }
+    let worker_flag = flag.clone();
+    let answer = tauri::async_runtime::spawn_blocking(move || drag_export_worker(app, req, worker_flag))
+        .await.map_err(|e| format!("Préparation du glisser-déposer interrompue : {e}"));
+    {
+        let mut active = state.active.lock().map_err(|e|e.to_string())?;
+        if active.as_ref().is_some_and(|current| Arc::ptr_eq(current, &flag)) {
+            *active = None;
+        }
+    }
+    let (dir, result) = answer??;
+    if flag.load(Ordering::SeqCst) {
+        let _ = fs::remove_dir_all(&dir);
+        return Err("Préparation remplacée par une nouvelle sélection.".into());
+    }
+    state.staged.lock().map_err(|e|e.to_string())?.push(dir);
+    Ok(result)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run(){tauri::Builder::default().plugin(tauri_plugin_dialog::init()).manage(ExtractState::default()).manage(CreateState::default()).manage(ConvertState::default()).manage(AddState::default())
-    .invoke_handler(tauri::generate_handler![list_archive,preview_extraction,extract_archive,cancel_extraction,create_archive,cancel_compression,convert_archive,cancel_conversion,add_to_archive,cancel_add])
+pub fn run(){tauri::Builder::default().plugin(tauri_plugin_dialog::init()).plugin(tauri_plugin_drag::init()).manage(DragExportState::default()).manage(ExtractState::default()).manage(CreateState::default()).manage(ConvertState::default()).manage(AddState::default())
+    .invoke_handler(tauri::generate_handler![list_archive,preview_extraction,extract_archive,cancel_extraction,create_archive,cancel_compression,convert_archive,cancel_conversion,add_to_archive,cancel_add,prepare_drag_export])
     .run(tauri::generate_context!()).expect("Impossible de lancer GEKKO ARCHIVE");}

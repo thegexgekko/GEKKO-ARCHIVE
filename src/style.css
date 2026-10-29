@@ -30,3 +30,11 @@ body { padding: 0; min-height: 100vh; overflow: hidden; background: transparent;
 .create-source-buttons{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0 7px}
 .create-path-list{max-height:115px;overflow:auto;margin:9px 0 0;padding:7px 9px;border-radius:8px;background:rgba(5,10,18,.35);font-size:11px;color:#c1d1e6;overflow-wrap:anywhere}
 .create-path-list>div{padding:3px 0}
+
+/* V0.4.2 - Indication discrète du glisser-déposer Windows, sans réorganisation des panneaux */
+.gekko-drop-indicator{pointer-events:none;position:absolute;z-index:95;bottom:17px;left:50%;transform:translateX(-50%);max-width:calc(100% - 40px);padding:10px 18px;border:1px dashed #f0b968;box-shadow:0 8px 35px #0007;border-radius:11px;color:#ffe1b1;background:#16253be9;font-size:12px;text-align:center}
+
+/* V0.4.3 : extraction par glisser-déposer depuis les fichiers de l'archive. */
+.file-line.file-export { cursor: grab; user-select: none; }
+.file-line.file-export:active { cursor: grabbing; }
+.gekko-drag-out-hint { margin: 8px 3px; color: #e6bc79; font-size: 11px; }

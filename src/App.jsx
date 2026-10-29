@@ -1,8 +1,10 @@
 import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {invoke} from '@tauri-apps/api/core';
 import {getCurrentWindow} from '@tauri-apps/api/window';
+import {getCurrentWebview} from '@tauri-apps/api/webview';
 import {open, save} from '@tauri-apps/plugin-dialog';
 import {listen} from '@tauri-apps/api/event';
+import {startDrag} from '@crabnebula/tauri-plugin-drag';
 import {Icon} from './icons.jsx';
 import heroLogo from './assets/GEKKO_ARCHIVE.png';
 import brandLogo from './assets/GEKKO_ARCHIVE_LOGO.png';
@@ -165,8 +167,8 @@ function CreationDialog({onClose,onCreated}) {
   </section></div>;
 }
 
-function AddDialog({archive,defaultPassword,onClose,onAdded}) {
-  const [sources,setSources]=useState([]);
+function AddDialog({archive,defaultPassword,onClose,onAdded,initialSources=[]}) {
+  const [sources,setSources]=useState(()=>initialSources);
   const [password,setPassword]=useState(defaultPassword||'');
   const [busy,setBusy]=useState(false);
   const [cancelAsked,setCancelAsked]=useState(false);
@@ -186,17 +188,27 @@ function AddDialog({archive,defaultPassword,onClose,onAdded}) {
       if(chosen){setSources(Array.isArray(chosen)?chosen:[chosen]);setError('');setResult(null);}
     }catch(e){setError(String(e));}
   }
-  async function add(){
-    if(!sources.length){setError('Sélectionne au moins un fichier ou un dossier.');return;}
+  async function add(sourcePaths=sources){
+    if(!sourcePaths.length){setError('Sélectionne au moins un fichier ou un dossier.');return;}
+    if(busy){setError('Un ajout est déjà en cours.');return;}
     setBusy(true);setError('');setCancelAsked(false);setProgress({percent:0,message:'Préparation de l’ajout…'});
     try{
-      const r=await invoke('add_to_archive',{req:{archivePath:archive.path,sourcePaths:sources,password:password||null}});
+      const r=await invoke('add_to_archive',{req:{archivePath:archive.path,sourcePaths:sourcePaths,password:password||null}});
       setResult(r);onAdded(r,password);
     }catch(e){setError(String(e));}
     finally{setBusy(false);}
   }
   async function cancel(){setCancelAsked(true);try{await invoke('cancel_add');}catch(e){setError(String(e));}}
-  return <div className="extract-overlay" role="presentation"><section className="extract-modal" role="dialog" aria-modal="true" aria-label="Ajouter à une archive">
+  const launchedFromDrop=useRef(null);
+  useEffect(()=>{
+    if(initialSources.length && launchedFromDrop.current!==initialSources){
+      launchedFromDrop.current=initialSources;
+      if(busy){setError('Attends la fin de l’ajout en cours.');return;}
+      setSources(initialSources);
+      add(initialSources);
+    }
+  },[initialSources]);
+  return <div className="extract-overlay" role="presentation"><section className="extract-modal" data-gekkodrop="modal-add" role="dialog" aria-modal="true" aria-label="Ajouter à une archive">
     <div className="extract-header"><Icon name="file-plus"/><h2>Ajouter à une archive</h2><button className="iconbtn" disabled={busy} onClick={onClose} aria-label="Fermer"><Icon name="close"/></button></div>
     <div className="extract-summary"><strong>{archive.name}</strong><span>Ajout à la racine de l'archive</span></div>
     <div className="create-sources"><div className="create-source-label"><strong>Fichiers et dossiers à ajouter</strong><span>{sources.length?`${sources.length} élément(s)`:'Aucune source'}</span></div>
@@ -210,7 +222,7 @@ function AddDialog({archive,defaultPassword,onClose,onAdded}) {
     {result&&<div className="extract-success" role="status"><Icon name="check"/><strong>Archive mise à jour et vérifiée</strong><p>{result.path}<br/>{bytes(result.bytes)}</p></div>}
     <div className="extract-footer">
       {busy?<button className="toolbtn" disabled={cancelAsked} onClick={cancel}>{cancelAsked?'Annulation demandée…':'Annuler l’ajout'}</button>:<button className="toolbtn" onClick={onClose}>{result?'Fermer':'Annuler'}</button>}
-      {!busy&&!result&&<button className="toolbtn primary" onClick={add}><Icon name="file-plus"/> Ajouter</button>}
+      {!busy&&!result&&<button className="toolbtn primary" onClick={()=>add()}><Icon name="file-plus"/> Ajouter</button>}
     </div>
     <p className="fine-print">Disponible pour ZIP et 7z. Le logiciel travaille sur une copie, vérifie le résultat, puis remplace l'archive originale. Les sources restent inchangées.</p>
   </section></div>;
@@ -296,8 +308,8 @@ function ConversionDialog({archive,defaultPassword,onClose,onConverted}) {
   </section></div>;
 }
 
-function ExtractionDialog({archive,selected,onClose,onFinished,defaultPassword}) {
-  const [destination,setDestination]=useState(()=>archiveParentDirectory(archive.path));
+function ExtractionDialog({archive,selected,onClose,onFinished,defaultPassword,initialDestination,autoStart=false}) {
+  const [destination,setDestination]=useState(()=>initialDestination||archiveParentDirectory(archive.path));
   const [password,setPassword]=useState(defaultPassword||'');
   const [policy,setPolicy]=useState('ask');
   const [preview,setPreview]=useState(null);
@@ -316,14 +328,15 @@ function ExtractionDialog({archive,selected,onClose,onFinished,defaultPassword})
     try{const path=await open({directory:true,multiple:false});if(path){setDestination(path);setPreview(null);setError('');}}
     catch(e){setError(String(e));}
   }
-  async function prepare(){
+  async function prepare(destinationOverride=null){
     if(working)return;
-    if(!destination){setError('Choisis un dossier de destination.');return;}
+    if(!(destinationOverride||destination)){setError('Choisis un dossier de destination.');return;}
     setError('');setWorking(true);
     setPhase({phase:'vérification',percent:0,message:''});
     try {
+      const effectiveReq=destinationOverride?{...req,destination:destinationOverride}:req;
       // Vérification automatique au clic sur Extraire, sans étape intermédiaire.
-      const p=await invoke('preview_extraction',{req});
+      const p=await invoke('preview_extraction',{req:effectiveReq});
       if(policy==='ask'&&p.conflicts.length>0){
         // Il faut seulement un deuxième clic lorsqu'un véritable conflit demande une décision.
         setPreview(p);
@@ -333,7 +346,7 @@ function ExtractionDialog({archive,selected,onClose,onFinished,defaultPassword})
       setPreview(null);
       setCancelAsked(false);
       setPhase({phase:'préparation',percent:0,message:'Démarrage…'});
-      const r=await invoke('extract_archive',{req});
+      const r=await invoke('extract_archive',{req:effectiveReq});
       setResult(r);
       onFinished(r);
     }
@@ -347,8 +360,17 @@ function ExtractionDialog({archive,selected,onClose,onFinished,defaultPassword})
     catch(e){setError(String(e));}finally{setWorking(false);}
   }
   async function cancel(){try{setCancelAsked(true);await invoke('cancel_extraction');}catch(e){setError(String(e));}}
+  const launchedFromDrop=useRef(false);
+  useEffect(()=>{
+    if(autoStart && initialDestination && launchedFromDrop.current!==initialDestination){
+      launchedFromDrop.current=initialDestination;
+      setDestination(initialDestination);
+      setPreview(null);
+      prepare(initialDestination);
+    }
+  },[initialDestination,autoStart]);
   return <div className="extract-overlay" role="presentation">
-    <section className="extract-modal" role="dialog" aria-modal="true" aria-label="Extraire les fichiers">
+    <section className="extract-modal" data-gekkodrop="modal-extract" role="dialog" aria-modal="true" aria-label="Extraire les fichiers">
       <div className="extract-header"><Icon name="package-open"/><h2>Extraire une archive</h2><button className="iconbtn" disabled={working} onClick={onClose} aria-label="Fermer"><Icon name="close"/></button></div>
       <div className="extract-summary"><strong>{archive.name}</strong><span>{selected.length?`${selected.length} élément(s) sélectionné(s)`:'Archive complète'}</span></div>
       <label className="field">Dossier de destination</label>
@@ -366,7 +388,7 @@ function ExtractionDialog({archive,selected,onClose,onFinished,defaultPassword})
       {result&&<div className="extract-success" role="status"><Icon name="check"/><strong>Extraction terminée</strong><p>{result.extracted} fichier(s) extrait(s), {result.skipped} ignoré(s).<br/>Destination : {result.destination}</p></div>}
       <div className="extract-footer">
         {working&&phase.message?<button className="toolbtn" disabled={cancelAsked} onClick={cancel}>{cancelAsked?'Annulation demandée…':'Annuler l’extraction'}</button>:<button className="toolbtn" onClick={onClose}>{result?'Fermer':'Annuler'}</button>}
-        {!result&&!working&&(preview?<button className="toolbtn primary" onClick={launch}><Icon name="package-open"/> Confirmer l’extraction</button>:<button className="toolbtn primary" onClick={prepare}><Icon name="package-open"/> Extraire</button>)}
+        {!result&&!working&&(preview?<button className="toolbtn primary" onClick={launch}><Icon name="package-open"/> Confirmer l’extraction</button>:<button className="toolbtn primary" onClick={()=>prepare()}><Icon name="package-open"/> Extraire</button>)}
       </div>
       <p className="fine-print">Extraction locale via 7-Zip. Les fichiers ne sont jamais remplacés sans la politique choisie.</p>
     </section>
@@ -380,6 +402,10 @@ export default function App(){
   const [folder,setFolder]=useState('');
   const [search,setSearch]=useState('');
   const [selected,setSelected]=useState([]);
+  const [outDragStatus,setOutDragStatus]=useState('');
+  const outDragReady=useRef(null);
+  const outDragArmed=useRef(null);
+  const outDragTicket=useRef(0);
   const [busy,setBusy]=useState(false);
   const [error,setError]=useState('');
   const [toast,setToast]=useState('');
@@ -392,10 +418,89 @@ export default function App(){
   const [createOpen,setCreateOpen]=useState(false);
   const [convertOpen,setConvertOpen]=useState(false);
   const [addOpen,setAddOpen]=useState(false);
+  const [droppedSources,setDroppedSources]=useState([]);
+  const [extractLaunch,setExtractLaunch]=useState(null);
+  const [dropHint,setDropHint]=useState('');
   const [archivePassword,setArchivePassword]=useState('');
   const [passwordPending,setPasswordPending]=useState('');
   const [passwordRetry,setPasswordRetry]=useState(null);
   const popupTimer=useRef(null);
+  const dropContext=useRef(null);
+  const handleNativeDrop=useRef(null);
+  dropContext.current={archive,archivePassword,selected,route,busy,addOpen,extractOpen,createOpen,convertOpen};
+  // Après la sélection, prépare uniquement les éléments sélectionnés.
+  // Le navigateur seul ne peut pas transférer des fichiers d'archive vers
+  // Explorer ; le plugin Tauri lance un glisser natif sur de vrais chemins.
+  useEffect(()=>{
+    const ticket=++outDragTicket.current;
+    outDragReady.current=null;
+    outDragArmed.current=null;
+    if(!archive || !selected.length || route!=='archive'){
+      setOutDragStatus('');return;
+    }
+    setOutDragStatus('Préparation de la sélection pour le glisser-déposer…');
+    const timer=setTimeout(()=>{
+      invoke('prepare_drag_export',{req:{
+        archivePath:archive.path,selectedPaths:[...selected],password:archivePassword||null
+      }}).then(result=>{
+        if(outDragTicket.current!==ticket)return;
+        outDragReady.current={key:selected.join('|'),data:result};
+        setOutDragStatus('Sélection prête : glisse-la vers un dossier Windows.');
+      }).catch(err=>{
+        if(outDragTicket.current!==ticket)return;
+        setOutDragStatus('Glisser-déposer indisponible : '+String(err));
+      });
+    },250);
+    return ()=>clearTimeout(timer);
+  },[archive?.path,archive?.bytes,archivePassword,selected.join('|'),route]);
+  function armExport(e,file){
+    if(e.button!==0)return;
+    const keys=selected.includes(file)?selected:[file];
+    outDragArmed.current={x:e.clientX,y:e.clientY,key:keys.join('|')};
+  }
+  function moveExport(e){
+    const armed=outDragArmed.current;
+    if(!armed || !(e.buttons&1))return;
+    if(Math.abs(e.clientX-armed.x)+Math.abs(e.clientY-armed.y)<8)return;
+    const ready=outDragReady.current;
+    if(!ready||ready.key!==armed.key){
+      // Rester armé : si la décompression finit avant le relâchement, le
+      // mouvement suivant pourra lancer le glisser natif.
+      return;
+    }
+    outDragArmed.current=null;
+    e.preventDefault();
+    startDrag({item:ready.data.paths,icon:ready.data.iconPath,mode:'copy'})
+      .catch(err=>notify('Glisser vers Windows impossible : '+String(err)));
+  }
+  const archiveFile=path=>/\.(zip|7z|rar|tar|gz|bz2|xz|zst|cab|iso|wim|arj|lzma)$/i.test(path);
+  const archiveWritable=path=>/\.(zip|7z)$/i.test(path);
+  const dropTarget=position=>{
+    const scale=window.devicePixelRatio||1;
+    const candidate=document.elementFromPoint(position.x/scale,position.y/scale);
+    return candidate?.closest('[data-gekkodrop]')?.getAttribute('data-gekkodrop')||'none';
+  };
+  useEffect(()=>{
+    if(!window.__TAURI_INTERNALS__)return;
+    let disposed=false;let stop;
+    getCurrentWebview().onDragDropEvent(event=>{
+      if(disposed)return;
+      const p=event.payload;
+      if(p.type==='leave'){setDropHint('');return;}
+      if(p.type==='enter'||p.type==='over'){
+        const target=dropTarget(p.position);
+        setDropHint(target==='extract'?'extract':target==='add'||target==='modal-add'?'add':target==='open'?'open':target==='modal-extract'?'destination':'');
+        return;
+      }
+      if(p.type==='drop'){
+        setDropHint('');
+        const paths=p.paths||[];
+        if(paths.length)handleNativeDrop.current?.(paths,dropTarget(p.position));
+      }
+    }).then(fn=>{if(disposed)fn();else stop=fn;}).catch(e=>console.error('Glisser-déposer Windows indisponible',e));
+    return ()=>{disposed=true;stop?.();};
+  },[]);
+
   useEffect(()=>()=>{if(popupTimer.current)clearTimeout(popupTimer.current);},[]);
   useEffect(()=>()=>{if(customBg)URL.revokeObjectURL(customBg);},[customBg]);
   function notify(text){setToast(text);clearTimeout(popupTimer.current);popupTimer.current=setTimeout(()=>setToast(''),4000);}
@@ -413,6 +518,7 @@ export default function App(){
       setBusy(true);setError('');
       const result=await invoke('list_archive',{archivePath:chosen,password:password||null});
       setArchive(result);setArchivePassword(password);setFolder('');setSearch('');setSelected([]);setRoute('archive');setPasswordRetry(null);setPasswordPending('');
+      return result;
     } catch(e){
       const message=String(e);setError(message);setRoute('archive');
       if(message.toLowerCase().includes('mot de passe')){setPasswordRetry(chosen);}
@@ -439,8 +545,68 @@ export default function App(){
     notify((labels[action]||'Cette fonction')+' sera développée lors des prochaines étapes.');
   }
   function doAction(action){if(action==='open'){chooseArchive();return;}if(action==='extract'){openExtraction();return;}if(action==='create'){setCreateOpen(true);return;}if(action==='convert'){setConvertOpen(true);return;}if(action==='add'){if(!archive){notify('Ouvre d’abord une archive ZIP ou 7z.');chooseArchive();return;}if(!/\.(zip|7z)$/i.test(archive.path)){notify('L’ajout est disponible uniquement pour ZIP et 7z.');return;}setAddOpen(true);return;}future(action);}
+  handleNativeDrop.current=async(paths,target)=>{
+    const context=dropContext.current;
+    if(context.busy){notify('Une opération est en cours.');return;}
+    if(context.addOpen){
+      if(target==='modal-add'){setDroppedSources([...paths]);return;}
+      notify('Dépose les fichiers dans la fenêtre « Ajouter ».');return;
+    }
+    if(context.extractOpen){
+      if(target==='modal-extract'&&paths.length===1&&!archiveFile(paths[0])){
+        setExtractLaunch({destination:paths[0],autoStart:true});return;
+      }
+      notify('Dépose un dossier de destination dans la fenêtre « Extraire ».');return;
+    }
+    if(context.createOpen||context.convertOpen){
+      notify('Ferme la fenêtre en cours avant un glisser-déposer.');return;
+    }
+    // Une archive déposée directement sur « Extraire » : extraction automatique
+    // dans son dossier, avec l'écran des conflits uniquement si nécessaire.
+    if(target==='extract'){
+      if(paths.length!==1){notify('Dépose une seule archive ou un seul dossier sur « Extraire ».');return;}
+      const path=paths[0];
+      if(archiveFile(path)){
+        const loaded=await loadArchive(path);
+        if(!loaded)return;
+        setExtractLaunch({destination:archiveParentDirectory(path),autoStart:true});
+        setExtractOpen(true);
+        return;
+      }
+      // Déposer un dossier Windows sur « Extraire » choisit sa destination
+      // pour les éléments sélectionnés de l'archive déjà ouverte.
+      if(!context.archive){notify('Ouvre une archive avant de déposer un dossier de destination.');return;}
+      setExtractLaunch({destination:path,autoStart:true});
+      setExtractOpen(true);
+      return;
+    }
+    if(target==='open'){
+      if(paths.length!==1||!archiveFile(paths[0])){
+        notify('Dépose un fichier archive pour l’ouvrir.');return;
+      }
+      await loadArchive(paths[0]);return;
+    }
+    if(target==='add'){
+      if(!context.archive){
+        if(paths.length===1&&archiveFile(paths[0]))await loadArchive(paths[0]);
+        else notify('Ouvre une archive ZIP ou 7z avant de déposer des fichiers.');
+        return;
+      }
+      if(!archiveWritable(context.archive.path)){
+        notify('L’ajout par glisser-déposer est disponible uniquement pour ZIP et 7z.');return;
+      }
+      if(paths.length>10000){notify('Sélection trop importante.');return;}
+      setDroppedSources(paths);
+      setAddOpen(true);
+    }
+  };
   function setImage(file){setCustomBg(URL.createObjectURL(file));setBg('custom');}
   const entries=useMemo(()=>archive?childrenOf(archive.files,folder).filter(f=>f.path.split('/').at(-1).toLocaleLowerCase('fr').includes(search.toLocaleLowerCase('fr'))):[],[archive,folder,search]);
+  // Sélectionner les éléments visibles du dossier courant, y compris les dossiers.
+  // La préparation des fichiers pour le glisser-déposer se déclenche déjà
+  // automatiquement lorsque `selected` change.
+  const allVisibleSelected=entries.length>0&&entries.every(f=>selected.includes(f.path));
+  function toggleSelectAll(){setSelected(allVisibleSelected?[]:entries.map(f=>f.path));}
   const folderTrail=folder?folder.split('/'):[];
   function toggleSelected(key){setSelected(prev=>prev.includes(key)?prev.filter(x=>x!==key):[...prev,key]);}
   return <div className="app" id="app" data-bg={bg} style={{'--alpha':alpha,...(customBg?{'--custom-bg':`url("${customBg}")`}:{})}}>
@@ -458,10 +624,10 @@ export default function App(){
         <div className="side-section-label">Espace de travail</div>
         {mainNav.map(n=><button key={n.id} title={n.text} className={'side-link'+(route===n.id?' active':'')} onClick={()=>goTo(n.id)}><Icon name={n.icon}/><span>{n.text}</span></button>)}
         <div className="side-section-label">Outils</div>
-        {actions.map(a=><button key={a.id} title={a.text} className="side-link" onClick={()=>doAction(a.id)}><Icon name={a.icon}/><span>{a.text}</span></button>)}
+        {actions.map(a=><button key={a.id} data-gekkodrop={a.id==='extract'?'extract':a.id==='add'?'add':a.id==='open'?'open':undefined} title={a.text} className="side-link" onClick={()=>doAction(a.id)}><Icon name={a.icon}/><span>{a.text}</span></button>)}
         <div className="side-bottom"><button className={'side-link'+(route==='settings'?' active':'')} onClick={()=>goTo('settings')} title="Paramètres"><Icon name="settings"/><span>Paramètres</span></button><button className="side-collapse" title={collapsed?'Déployer le menu':'Réduire le menu'} onClick={()=>setCollapsed(v=>!v)}><Icon name="chevron"/><span>{collapsed?'Déployer le menu':'Réduire le menu'}</span></button></div>
       </aside>
-      <section className="content"><main className="page" id="page">
+      <section className="content"><main className="page" id="page" data-gekkodrop={route==='archive'?(archive?'add':'open'):route==='home'?'open':undefined}>
         {route==='home'&&<div className="page-inner"><section className="hero"><div className="hero-copy"><div className="eyebrow">Gestionnaire d’archives · Windows 11</div><h1>Vos archives.<br/><em>En toute maîtrise.</em></h1><p>Créez, explorez et organisez vos archives dans un espace pensé pour la simplicité, la rapidité et la maîtrise de vos fichiers.</p><div className="hero-buttons"><AppButton action={actions[0]} primary onClick={()=>doAction('create')}/><AppButton action={{text:'Ouvrir une archive',icon:'folder-open'}} onClick={chooseArchive}/></div></div><img className="hero-logo" src={heroLogo} alt="Logo GEKKO ARCHIVE"/></section></div>}
         {route==='archive'&&<div className="page-inner">
           <div className="workspace-heading"><div><h1>{archive?.name||'Explorer une archive'}</h1><p>{archive?'Contenu réel de l’archive — extraction disponible':'Choisissez une archive pour voir son contenu'}</p></div><button className="toolbtn primary" disabled={busy} onClick={chooseArchive}><Icon name="folder-open"/>{busy?'Lecture en cours…':'Ouvrir une archive'}</button></div>
@@ -471,15 +637,16 @@ export default function App(){
           {!archive&&!busy&&<div className="no-archive"><Icon name="archive"/><h2>Aucune archive ouverte</h2><p>Ouvre un fichier ZIP, 7z ou RAR pour parcourir ses fichiers sans les extraire.</p><button className="toolbtn primary" onClick={chooseArchive}><Icon name="folder-open"/> Ouvrir une archive</button></div>}
           {archive&&<>
             <div className="pathbar"><Icon name="folder"/><button className="pathpart" onClick={()=>{setFolder('');setSelected([]);}}>{archive.name}</button>{folderTrail.map((part,i)=><React.Fragment key={i}><span>/</span><button className="pathpart" onClick={()=>{setFolder(folderTrail.slice(0,i+1).join('/'));setSelected([]);}}>{part}</button></React.Fragment>)}<span className="pill">{archive.format}</span></div>
-            <div className="list-actions"><button className="toolbtn" onClick={openExtraction}><Icon name="package-open"/> Extraire</button><div className="search"><Icon name="search"/><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Rechercher dans ce dossier…" aria-label="Rechercher dans ce dossier"/></div></div>
+            <div className="list-actions"><button className="toolbtn" onClick={openExtraction}><Icon name="package-open"/> Extraire</button><button className="toolbtn" disabled={!entries.length} onClick={toggleSelectAll} title="Sélectionner tous les éléments affichés dans ce dossier" aria-label={allVisibleSelected?"Tout désélectionner":"Tout sélectionner"}><Icon name="check"/> {allVisibleSelected?"Tout désélectionner":"Tout sélectionner"}</button><div className="search"><Icon name="search"/><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Rechercher dans ce dossier…" aria-label="Rechercher dans ce dossier"/></div></div>
             <section className="listpanel"><div className="list-head"><span>Nom</span><span>Type</span><span>Taille</span><span>Compressé</span><span>Modifié le</span></div>
               {folder&&<div className="file-line" tabIndex={0} role="button" onClick={()=>{setFolder(folder.split('/').slice(0,-1).join('/'));setSelected([]);}} onKeyDown={e=>{if(e.key==='Enter'){setFolder(folder.split('/').slice(0,-1).join('/'));setSelected([]);}}}><b><Icon name="folder"/><span className="name">..</span></b><span>Dossier parent</span><span>—</span><span>—</span><span>—</span></div>}
-              {entries.map(f=><div key={f.path} tabIndex={0} role="button" aria-label={`${f.isDir?'Ouvrir le dossier':'Sélectionner le fichier'} ${f.path}`} className={'file-line'+(selected.includes(f.path)?' selected':'')} onClick={()=>toggleSelected(f.path)} onDoubleClick={()=>{if(f.isDir){setFolder(f.path);setSelected([]);setSearch('');}}} onKeyDown={e=>{if(e.key==='Enter'){if(f.isDir){setFolder(f.path);setSearch('');setSelected([]);}else toggleSelected(f.path);}}}>
+              {entries.map(f=><div key={f.path} tabIndex={0} role="button" aria-label={`${f.isDir?'Ouvrir le dossier':'Sélectionner le fichier'} ${f.path}`} className={'file-line'+(selected.includes(f.path)?' selected':'')+' file-export'} onPointerDown={e=>armExport(e,f.path)} onPointerMove={moveExport} onPointerUp={()=>{outDragArmed.current=null;}} onPointerCancel={()=>{outDragArmed.current=null;}} onClick={()=>toggleSelected(f.path)} onDoubleClick={()=>{if(f.isDir){setFolder(f.path);setSelected([]);setSearch('');}}} onKeyDown={e=>{if(e.key==='Enter'){if(f.isDir){setFolder(f.path);setSearch('');setSelected([]);}else toggleSelected(f.path);}}}>
                 <b><Icon name={f.isDir?'folder':'file'}/><span className="name">{f.path.split('/').at(-1)}</span></b><span>{f.isDir?'Dossier':(f.path.split('.').at(-1)||'Fichier').toUpperCase()}</span><span>{f.isDir?'—':bytes(f.size)}</span><span>{f.isDir?'—':bytes(f.packedSize)}</span><span>{f.modified||'—'}</span>
               </div>)}
               {entries.length===0&&!folder&&<div className="empty"><Icon name="search"/><p>{search?'Aucun résultat dans ce dossier.':'Cette archive ne contient aucun élément visible.'}</p></div>}
               {entries.length===0&&folder&&<div className="empty"><p>Ce dossier ne contient aucun élément correspondant.</p></div>}
             </section>
+            {selected.length>0&&<p className="gekko-drag-out-hint" role="status">{outDragStatus||"Sélectionne les éléments à extraire par glisser-déposer."}</p>}
             {info&&<div className="info-panel"><div className="stat"><small>Format</small><strong>{archive.format}</strong></div><div className="stat"><small>Taille de l'archive</small><strong>{bytes(archive.bytes)}</strong></div><div className="stat"><small>Éléments</small><strong>{archive.files.length}</strong></div><div className="stat"><small>Sélection</small><strong>{selected.length} élément(s)</strong></div></div>}
           </>}
         </div>}
@@ -487,9 +654,12 @@ export default function App(){
       </main></section>
     </div>
     {createOpen&&<CreationDialog onClose={()=>setCreateOpen(false)} onCreated={(r,openNow=false)=>{if(openNow)loadArchive(r.path);else notify('Archive créée et vérifiée.');}}/>}
-    {addOpen&&archive&&<AddDialog archive={archive} defaultPassword={archivePassword} onClose={()=>setAddOpen(false)} onAdded={(_r,pass)=>{loadArchive(archive.path,pass);notify('Archive mise à jour et vérifiée.');}}/>}
+    {addOpen&&archive&&<AddDialog initialSources={droppedSources} archive={archive} defaultPassword={archivePassword} onClose={()=>{setAddOpen(false);setDroppedSources([]);}} onAdded={(_r,pass)=>{loadArchive(archive.path,pass);notify('Archive mise à jour et vérifiée.');}}/>}
     {convertOpen&&<ConversionDialog archive={archive} defaultPassword={archivePassword} onClose={()=>setConvertOpen(false)} onConverted={()=>notify('Archive convertie et vérifiée. Original conservé.')}/>}
-    {extractOpen&&archive&&<ExtractionDialog key={archive.path} archive={archive} selected={selected} defaultPassword={archivePassword} onClose={()=>setExtractOpen(false)} onFinished={r=>notify(`${r.extracted} fichier(s) extrait(s).`)}/>}
+    {extractOpen&&archive&&<ExtractionDialog key={archive.path+'|'+(extractLaunch?.destination||'')} archive={archive} selected={selected} initialDestination={extractLaunch?.destination} autoStart={!!extractLaunch?.autoStart} defaultPassword={archivePassword} onClose={()=>{setExtractOpen(false);setExtractLaunch(null);}} onFinished={r=>notify(`${r.extracted} fichier(s) extrait(s).`)}/>}
+    {dropHint&&<div className="gekko-drop-indicator" aria-hidden="true">
+      {dropHint==='extract'?'Relâche pour extraire dans le dossier de l’archive':dropHint==='add'?'Relâche pour ajouter les fichiers dans l’archive':dropHint==='destination'?'Relâche pour extraire dans ce dossier':'Relâche pour ouvrir cette archive'}
+    </div>}
     <div className={'toast'+(toast?' show':'')} role="status" aria-live="polite">{toast}</div>
   </div>;
 }
