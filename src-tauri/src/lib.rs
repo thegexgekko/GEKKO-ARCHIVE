@@ -180,8 +180,41 @@ fn read_listing(archive:&Path,password:Option<&str>)->Result<Vec<ArchiveFile>,St
     }
     read_listing_single(archive,password)
 }
+// GEKKO-STARTUP-PREFETCH-V071 : lire en parallele au premier lancement
+// sans attendre que WebView2 et React aient fini de demarrer.
+struct StartupArchivePrefetch {
+    path: PathBuf,
+    worker: std::thread::JoinHandle<Result<ArchiveInfo,String>>,
+}
+static STARTUP_ARCHIVE_PREFETCH: std::sync::OnceLock<Mutex<Option<StartupArchivePrefetch>>> =
+    std::sync::OnceLock::new();
+
 #[tauri::command]
 fn list_archive(archive_path:String,password:Option<String>)->Result<ArchiveInfo,String>{
+    // Le cache ne concerne que l'archive lancee depuis l'Explorateur,
+    // sans mot de passe. Tout autre cas conserve la lecture existante.
+    if password.as_deref().unwrap_or("").is_empty() {
+        if let Some(cache) = STARTUP_ARCHIVE_PREFETCH.get() {
+            let pending = match cache.lock() {
+                Ok(mut state) => {
+                    if state.as_ref().is_some_and(|job| job.path == PathBuf::from(&archive_path)) {
+                        state.take()
+                    } else { None }
+                },
+                Err(_) => None,
+            };
+            if let Some(job) = pending {
+                return match job.worker.join() {
+                    Ok(result) => result,
+                    Err(_) => list_archive_uncached(archive_path,password),
+                };
+            }
+        }
+    }
+    list_archive_uncached(archive_path,password)
+}
+
+fn list_archive_uncached(archive_path:String,password:Option<String>)->Result<ArchiveInfo,String>{
     let archive=PathBuf::from(&archive_path);
     let m=archive.metadata().map_err(|e|format!("Archive introuvable : {e}"))?;
     if !m.is_file(){return Err("Le chemin sélectionné n'est pas une archive.".into());}
@@ -276,8 +309,10 @@ fn preview_extraction(req:ExtractRequest)->Result<ExtractPreview,String>{
     let total_bytes=files.iter().filter(|f|!f.is_dir).fold(0u64,|n,f|n.saturating_add(f.size));
     Ok(ExtractPreview{files:files.iter().filter(|f|!f.is_dir).count(),folders:files.iter().filter(|f|f.is_dir).count(),total_bytes,conflicts})
 }
-fn emit_progress(app:&AppHandle,phase:&str,percent:u8,message:&str){
-    let _=app.emit("gekko-extraction-progress",Progress{phase:phase.into(),percent,message:message.into()});
+fn emit_progress(app:Option<&AppHandle>,phase:&str,percent:u8,message:&str){
+    if let Some(app)=app {
+        let _=app.emit("gekko-extraction-progress",Progress{phase:phase.into(),percent,message:message.into()});
+    }
 }
 struct TempStage(PathBuf);
 impl Drop for TempStage{fn drop(&mut self){let _=fs::remove_dir_all(&self.0);}}
@@ -287,12 +322,12 @@ fn create_stage()->Result<TempStage,String>{
         match fs::create_dir(&p){Ok(())=>return Ok(TempStage(p)),Err(e) if e.kind()==std::io::ErrorKind::AlreadyExists=>continue,Err(e)=>return Err(format!("Dossier temporaire inaccessible : {e}"))}}
     Err("Création d'un dossier temporaire impossible.".into())
 }
-fn read_progress<R:Read>(mut reader:R,app:AppHandle){
+fn read_progress<R:Read>(mut reader:R,app:Option<AppHandle>){
     let mut b=[0u8;8192];let mut token=Vec::new();
     while let Ok(n)=reader.read(&mut b){if n==0{break;}
         for x in &b[..n]{if *x==b'\r'||*x==b'\n'{
             let line=String::from_utf8_lossy(&token);
-            for word in line.split_whitespace(){if let Some(p)=word.strip_suffix('%').and_then(|t|t.parse::<u8>().ok()){emit_progress(&app,"extraction",p.min(100).saturating_mul(80)/100,"Décompression en cours…");break;}}
+            for word in line.split_whitespace(){if let Some(p)=word.strip_suffix('%').and_then(|t|t.parse::<u8>().ok()){emit_progress(app.as_ref(),"extraction",p.min(100).saturating_mul(80)/100,"Décompression en cours…");break;}}
             token.clear();
         }else if token.len()<4096{token.push(*x);}}
     }
@@ -322,16 +357,16 @@ fn transfer_file(src:&Path,dest:&Path,replace:bool)->Result<(),String>{
         Err(e)=>{let _=fs::remove_file(&temp);if had_existing{let _=fs::rename(&backup,dest);}Err(format!("Écriture impossible : {e}"))}
     }
 }
-fn extract_worker(app:AppHandle,req:ExtractRequest,cancel:Arc<AtomicBool>)->Result<ExtractResult,String>{
+fn extract_worker(app:Option<AppHandle>,req:ExtractRequest,cancel:Arc<AtomicBool>)->Result<ExtractResult,String>{
     let (archive,dest,files,_)=prepare(&req)?;
     if !matches!(req.policy.as_str(),"skip"|"replace"|"ask"){return Err("Politique de conflits non reconnue.".into());}
     if files.is_empty(){return Err("Aucun fichier à extraire.".into());}
     let stage=create_stage()?;let engine=find_engine()?;
-    emit_progress(&app,"extraction",0,"Préparation de l'extraction…");
+    emit_progress(app.as_ref(),"extraction",0,"Préparation de l'extraction…");
     let output_dir=stage.0.join("output");
     fs::create_dir(&output_dir).map_err(|e|e.to_string())?;
     let layered=if is_layered_tar(&archive){
-        emit_progress(&app,"extraction",3,"Décompression de l'enveloppe TAR…");
+        emit_progress(app.as_ref(),"extraction",3,"Décompression de l'enveloppe TAR…");
         Some(unpack_tar_layer(&archive,req.password.as_deref(),Some(cancel.as_ref()))?)
     }else{None};
     if is_zstd_file(&archive){
@@ -383,7 +418,7 @@ fn extract_worker(app:AppHandle,req:ExtractRequest,cancel:Arc<AtomicBool>)->Resu
     } // Fin de l'extraction 7-Zip ; ZSTD est traité localement par Rust.
     // La liste d'inclusion ne doit pas être copiée dans le dossier final.
     ensure_stage_safe(&output_dir)?;
-    emit_progress(&app,"copie",82,"Transfert vers la destination…");
+    emit_progress(app.as_ref(),"copie",82,"Transfert vers la destination…");
     let total=files.len();let mut copied=0;let mut skipped=0;
     for (i,f) in files.iter().enumerate(){
         if cancel.load(Ordering::SeqCst){return Err(format!("Extraction annulée : {copied} fichier(s) déjà transféré(s) ont été conservés."));}
@@ -400,9 +435,9 @@ fn extract_worker(app:AppHandle,req:ExtractRequest,cancel:Arc<AtomicBool>)->Resu
         }
         transfer_file(&source,&target,target.exists())?;copied+=1;
         let pct=82+(((i+1)*18/total) as u8);
-        emit_progress(&app,"copie",pct,&format!("{}/{} fichiers transférés",i+1,total));
+        emit_progress(app.as_ref(),"copie",pct,&format!("{}/{} fichiers transférés",i+1,total));
     }
-    emit_progress(&app,"terminé",100,"Extraction terminée.");
+    emit_progress(app.as_ref(),"terminé",100,"Extraction terminée.");
     Ok(ExtractResult{extracted:copied,skipped,destination:req.destination})
 }
 #[tauri::command]
@@ -412,7 +447,7 @@ async fn extract_archive(app:AppHandle,state:State<'_,ExtractState>,req:ExtractR
         if active.is_some(){return Err("Une extraction est déjà en cours.".into());}
         *active=Some(flag.clone());
     }
-    let answer=tauri::async_runtime::spawn_blocking(move||extract_worker(app,req,flag)).await
+    let answer=tauri::async_runtime::spawn_blocking(move||extract_worker(Some(app),req,flag)).await
         .map_err(|e|format!("Erreur de tâche : {e}"));
     *state.active.lock().map_err(|e|e.to_string())?=None;
     answer?
@@ -518,8 +553,8 @@ fn compression_progress<R:Read>(mut input:R,app:AppHandle){
 fn emit_compression(app:&AppHandle,phase:&str,percent:u8,message:&str){
     let _=app.emit("gekko-compression-progress",Progress{phase:phase.into(),percent,message:message.into()});
 }
-fn create_tar_intermediate(app:&AppHandle,engine:&Path,base:&Path,tar:&Path,sources:&[String],cancel:&AtomicBool)->Result<(),String>{
-    emit_compression(app,"tar",5,"Regroupement des fichiers dans un TAR temporaire…");
+fn create_tar_intermediate(app:Option<&AppHandle>,engine:&Path,base:&Path,tar:&Path,sources:&[String],cancel:&AtomicBool)->Result<(),String>{
+    if let Some(app)=app { emit_compression(app,"tar",5,"Regroupement des fichiers dans un TAR temporaire…"); }
     let mut cmd=Command::new(engine);
     let mut child=cmd.current_dir(base).arg("a").arg("-ttar").arg("-y")
         .arg("-sccUTF-8").arg("-scsUTF-8").arg("-spd")
@@ -541,7 +576,9 @@ fn create_tar_intermediate(app:&AppHandle,engine:&Path,base:&Path,tar:&Path,sour
     if !result.success(){return Err("Le TAR intermédiaire n'a pas passé la vérification d'intégrité.".into());}
     Ok(())
 }
-fn create_worker(app:AppHandle,req:CreateRequest,cancel:Arc<AtomicBool>)->Result<CreateResult,String>{
+// Le moteur de creation est reutilise tel quel pour le clic droit silencieux.
+// En mode sans interface, seuls les evenements de progression sont ignores.
+fn create_worker(app:Option<AppHandle>,req:CreateRequest,cancel:Arc<AtomicBool>)->Result<CreateResult,String>{
     let (base,destination,source_names)=validate_create(&req)?;
     let engine=find_engine()?;
     let kind=req.format.to_ascii_lowercase();
@@ -549,7 +586,7 @@ fn create_worker(app:AppHandle,req:CreateRequest,cancel:Arc<AtomicBool>)->Result
     let temporary=TemporaryArchive(destination.parent().ok_or("Dossier de sortie invalide.")?
         .join(format!(".gekko-create-{}-{stamp}.{kind}",std::process::id())));
     if temporary.0.exists(){return Err("Un fichier de travail existe déjà, recommence l'opération.".into());}
-    emit_compression(&app,"préparation",0,"Préparation des fichiers…");
+    if let Some(app)=app.as_ref() { emit_compression(app,"préparation",0,"Préparation des fichiers…"); }
     if cancel.load(Ordering::SeqCst){return Err("Compression annulée.".into());}
     // Pour TAR.GZ, TAR.XZ et TAR.BZ2 : deux étapes, sans moteur supplémentaire.
     let layered=kind.starts_with("tar.");
@@ -558,7 +595,7 @@ fn create_worker(app:AppHandle,req:CreateRequest,cancel:Arc<AtomicBool>)->Result
         let dest_name=destination.file_name().and_then(|n|n.to_str()).unwrap_or("archive.tar.gz");
         let inner_name=dest_name.rsplit_once('.').map(|(base,_)|base).unwrap_or("archive.tar");
         let path=stage.0.join(inner_name);
-        create_tar_intermediate(&app,&engine,&base,&path,&source_names,&cancel)?;
+        create_tar_intermediate(app.as_ref(),&engine,&base,&path,&source_names,&cancel)?;
         Some(path)
     }else{None};
     let effective_kind=match kind.as_str(){
@@ -585,7 +622,16 @@ fn create_worker(app:AppHandle,req:CreateRequest,cancel:Arc<AtomicBool>)->Result
     let stdout=child.stdout.take().ok_or("Progression du moteur inaccessible.")?;
     let stderr=child.stderr.take().ok_or("Erreurs du moteur inaccessibles.")?;
     let progress_app=app.clone();
-    let progress_thread=std::thread::spawn(move||compression_progress(stdout,progress_app));
+    let progress_thread=std::thread::spawn(move||{
+        match progress_app {
+            Some(app)=>compression_progress(stdout,app),
+            None=>{
+                // Lire stdout completement pour eviter un blocage de 7-Zip.
+                let mut reader=stdout;
+                let _=std::io::copy(&mut reader,&mut std::io::sink());
+            }
+        }
+    });
     let error_thread=std::thread::spawn(move||{
         let mut output=String::new();
         // Toujours vider stderr pour ne pas bloquer le processus si 7-Zip
@@ -604,7 +650,7 @@ fn create_worker(app:AppHandle,req:CreateRequest,cancel:Arc<AtomicBool>)->Result
     if cancel.load(Ordering::SeqCst){return Err("Compression annulée. Aucune archive créée.".into());}
     if !status.success(){return Err(format!("Échec de compression 7-Zip ({status}) : {}",errors.chars().take(500).collect::<String>()));}
     if !temporary.0.is_file(){return Err("Le moteur n'a pas produit de fichier d'archive.".into());}
-    emit_compression(&app,"vérification",90,"Vérification de la nouvelle archive…");
+    if let Some(app)=app.as_ref() { emit_compression(app,"vérification",90,"Vérification de la nouvelle archive…"); }
     let mut test=Command::new(&engine);
     test.arg("t").arg("-y").arg("-bsp0").arg("-bso0").arg("-bse0");
     if let Some(pass)=req.password.as_deref().filter(|p|!p.is_empty()){test.arg(format!("-p{pass}"));}
@@ -619,7 +665,7 @@ fn create_worker(app:AppHandle,req:CreateRequest,cancel:Arc<AtomicBool>)->Result
     };
     if cancel.load(Ordering::SeqCst){return Err("Compression annulée. Aucune archive créée.".into());}
     if !check.success(){return Err("L'archive créée n'a pas passé le test d'intégrité 7-Zip. Elle ne sera pas conservée.".into());}
-    emit_compression(&app,"finalisation",96,"Enregistrement de l'archive…");
+    if let Some(app)=app.as_ref() { emit_compression(app,"finalisation",96,"Enregistrement de l'archive…"); }
     // create_new interdit tout écrasement, y compris si une autre application
     // a créé un fichier au même emplacement pendant la compression.
     let mut output=fs::OpenOptions::new().write(true).create_new(true).open(&destination)
@@ -635,7 +681,7 @@ fn create_worker(app:AppHandle,req:CreateRequest,cancel:Arc<AtomicBool>)->Result
         let _=fs::remove_file(&destination);
         return Err(format!("Écriture de l'archive impossible : {e}"));
     }};
-    emit_compression(&app,"terminé",100,"Archive créée et vérifiée.");
+    if let Some(app)=app.as_ref() { emit_compression(app,"terminé",100,"Archive créée et vérifiée."); }
     Ok(CreateResult{path:destination.to_string_lossy().into_owned(),bytes})
 }
 #[tauri::command]
@@ -646,7 +692,7 @@ async fn create_archive(app:AppHandle,state:State<'_,CreateState>,req:CreateRequ
         if lock.is_some(){return Err("Une compression est déjà en cours.".into());}
         *lock=Some(flag.clone());
     }
-    let result=tauri::async_runtime::spawn_blocking(move||create_worker(app,req,flag)).await
+    let result=tauri::async_runtime::spawn_blocking(move||create_worker(Some(app),req,flag)).await
         .map_err(|e|format!("Erreur de tâche : {e}"));
     *state.active.lock().map_err(|e|e.to_string())?=None;
     result?
@@ -707,7 +753,7 @@ fn conversion_worker(app:AppHandle, req:ConvertRequest, cancelled:Arc<AtomicBool
     };
     // extract_worker réalise déjà les contrôles de chemins, les vérifications
     // des liens ainsi que l'extraction sécurisée avant transfert.
-    let _=extract_worker(app.clone(),extraction,cancelled.clone())?;
+    let _=extract_worker(Some(app.clone()),extraction,cancelled.clone())?;
     if cancelled.load(Ordering::SeqCst){return Err("Conversion annulée.".into());}
     // Ne pas introduire un dossier racine artificiel dans l'archive convertie.
     let mut contents=Vec::new();
@@ -724,7 +770,7 @@ fn conversion_worker(app:AppHandle, req:ConvertRequest, cancelled:Arc<AtomicBool
     };
     // create_worker produit une archive temporaire, vérifie son intégrité et
     // refuse de remplacer un fichier existant. L'archive source reste intacte.
-    let result=create_worker(app.clone(),create,cancelled.clone())?;
+    let result=create_worker(Some(app.clone()),create,cancelled.clone())?;
     if cancelled.load(Ordering::SeqCst){
         // Une annulation très tardive peut arriver juste après la publication.
         // On ne supprime pas un fichier terminé à ce stade.
@@ -1245,7 +1291,7 @@ fn drag_export_worker(app: AppHandle, req: DragExportRequest, cancelled: Arc<Ato
     };
     // Réemploi du processus d'extraction sécurisé, sans aucune nouvelle
     // écriture dans l'archive d'origine ni accès au dossier de destination.
-    let result = extract_worker(app, extract_req, cancelled.clone())?;
+    let result = extract_worker(Some(app), extract_req, cancelled.clone())?;
     if cancelled.load(Ordering::SeqCst) { return Err("Préparation remplacée par une nouvelle sélection.".into()); }
     if result.skipped != 0 { return Err("Éléments non préparés pour le glisser-déposer.".into()); }
     let mut paths = Vec::new();
@@ -1515,8 +1561,145 @@ fn set_context_menu_commands(commands:Vec<String>)->Result<(),String>{
     result
 }
 
+
+// GEKKO ARCHIVE V0.7.1 - Extraction depuis le clic droit sans fenêtre React.
+// Une seconde invocation du même EXE travaille indépendamment de l'instance UI.
+// On réutilise le moteur d'extraction sécurisé V0.6.4 (stage, chemins sûrs,
+// liens refusés, absence d'écrasement automatique).
+#[cfg(windows)]
+#[link(name="user32")]
+unsafe extern "system" {
+    fn MessageBoxW(hwnd:*mut std::ffi::c_void, message:*const u16, title:*const u16, flags:u32)->i32;
+}
+#[cfg(windows)]
+fn shell_message(message:&str, warning:bool) {
+    use std::os::windows::ffi::OsStrExt;
+    let cap:Vec<u16>=std::ffi::OsStr::new("GEKKO ARCHIVE - Clic droit").encode_wide().chain(Some(0)).collect();
+    let body:Vec<u16>=std::ffi::OsStr::new(message).encode_wide().chain(Some(0)).collect();
+    let flags=0x00000000u32 | if warning {0x00000030} else {0x00000040};
+    unsafe { MessageBoxW(std::ptr::null_mut(),body.as_ptr(),cap.as_ptr(),flags); }
+}
+#[cfg(windows)]
+fn shell_failure_log(error:&str) {
+    let Some(local)=std::env::var_os("LOCALAPPDATA") else{return};
+    let path=PathBuf::from(local).join("GEKKO_ARCHIVE");
+    if fs::create_dir_all(&path).is_err(){return;}
+    if let Ok(mut f)=fs::OpenOptions::new().append(true).create(true).open(path.join("extraction_clic_droit.log")) {
+        let _=writeln!(f,"[{:?}] {}",SystemTime::now(),error.replace('\n'," "));
+    }
+}
+#[cfg(windows)]
+fn run_shell_extraction()->Option<i32>{
+    use std::ffi::OsString;
+    let mut args=std::env::args_os();
+    let _binary=args.next();
+    if args.next()? != OsString::from("--gekko-shell-extract") {return None;}
+    let result=(||->Result<ExtractResult,String>{
+        let kind=args.next().ok_or("Action de clic droit absente.")?;
+        let source=args.next().ok_or("Fichier d'archive absent.")?;
+        if args.next().is_some(){return Err("Paramètres d'extraction supplémentaires inattendus.".into());}
+        let archive=fs::canonicalize(PathBuf::from(source)).map_err(|e|format!("Archive inaccessible : {e}"))?;
+        if !archive.is_file(){return Err("L'élément sélectionné n'est pas un fichier d'archive.".into());}
+        let destination=if kind==OsString::from("here") {
+            archive.parent().ok_or("Dossier parent introuvable.")?.to_path_buf()
+        } else if kind==OsString::from("folder") {
+            PathBuf::from(ensure_shell_extract_folder(archive.to_string_lossy().into_owned())?)
+        } else {return Err("Commande d'extraction inconnue.".into());};
+        let request=ExtractRequest{
+            archive_path:archive.to_string_lossy().into_owned(),
+            destination:destination.to_string_lossy().into_owned(),
+            selected_paths:Vec::new(), password:None,
+            policy:"skip".to_string(), decisions:HashMap::new(),
+        };
+        extract_worker(None,request,Arc::new(AtomicBool::new(false)))
+    })();
+    match result {
+        Ok(result)=>{
+            if result.skipped>0 {
+                shell_message(&format!("Extraction terminée. {} fichier(s) extraits, {} fichier(s) déjà présents ignorés pour éviter tout écrasement.",result.extracted,result.skipped),true);
+            }
+            Some(0)
+        }
+        Err(error)=>{
+            shell_failure_log(&error);
+            shell_message(&format!("Extraction impossible :\n\n{}\n\nPour une archive protégée ou des options avancées, ouvre-la dans GEKKO ARCHIVE.", error.chars().take(600).collect::<String>()),true);
+            Some(1)
+        }
+    }
+}
+#[cfg(not(windows))]
+fn run_shell_extraction()->Option<i32>{None}
+
+
+// Creation ZIP ou 7z depuis le menu Windows, sans demarrer Tauri/React.
+// Le meme create_worker que l'interface protege contre les ecrasements,
+// les reparse-points et verifie le CRC avant publication de l'archive.
+#[cfg(windows)]
+fn run_shell_compression()->Option<i32>{
+    use std::ffi::OsString;
+    let mut args=std::env::args_os();
+    let _binary=args.next();
+    if args.next()? != OsString::from("--gekko-shell-compress") {return None;}
+    let result=(||->Result<CreateResult,String>{
+        let requested=args.next().ok_or("Format de compression absent.")?;
+        let kind=if requested==OsString::from("zip") {"zip"}
+            else if requested==OsString::from("7z") {"7z"}
+            else {return Err("Le clic droit ne prend en charge que ZIP et 7z.".into());};
+        let raw_source=args.next().ok_or("Fichier ou dossier source absent.")?;
+        if args.next().is_some(){return Err("Parametres supplementaires inattendus.".into());}
+        let source=fs::canonicalize(PathBuf::from(raw_source))
+            .map_err(|e|format!("Source inaccessible : {e}"))?;
+        let parent=source.parent().ok_or("Dossier parent de la source introuvable.")?;
+        let name=source.file_name().and_then(|x|x.to_str())
+            .ok_or("Nom du fichier source non pris en charge.")?;
+        let dest=parent.join(format!("{name}.{kind}"));
+        let req=CreateRequest{
+            source_paths:vec![source.to_string_lossy().into_owned()],
+            destination:dest.to_string_lossy().into_owned(),
+            format:kind.into(),level:5,password:None,
+        };
+        create_worker(None,req,Arc::new(AtomicBool::new(false)))
+    })();
+    match result {
+        Ok(_)=>Some(0),
+        Err(error)=>{
+            shell_failure_log(&format!("Compression clic droit : {error}"));
+            shell_message(&format!("Compression impossible :\n\n{}\n\nAucun fichier existant n'a ete remplace. Pour personnaliser la compression, ouvre GEKKO ARCHIVE.",
+                error.chars().take(600).collect::<String>()),true);
+            Some(1)
+        }
+    }
+}
+#[cfg(not(windows))]
+fn run_shell_compression()->Option<i32>{None}
+
+// GEKKO-STARTUP-PREFETCH-V071 : demarrer la lecture en meme temps que
+// le lancement Tauri. Ne maintient aucun processus resident apres fermeture.
+fn start_archive_prefetch() {
+    let args:Vec<_> = std::env::args_os().skip(1).collect();
+    let candidate = match args.as_slice() {
+        [path] => path,
+        [flag, action, path]
+            if flag.to_string_lossy()=="--gekko-shell-action"
+                && action.to_string_lossy()=="open" => path,
+        _ => return,
+    };
+    let path=PathBuf::from(candidate.as_os_str());
+    let ext=path.extension().and_then(|e|e.to_str()).unwrap_or("").to_ascii_lowercase();
+    if !matches!(ext.as_str(),"zip"|"7z"|"rar"|"tar"|"gz"|"bz2"|"xz"|"zst"|"iso"|"cab")
+        || !path.is_file() {return;}
+    let worker_path=path.clone();
+    let worker=std::thread::spawn(move || {
+        list_archive_uncached(worker_path.to_string_lossy().into_owned(),None)
+    });
+    let _=STARTUP_ARCHIVE_PREFETCH.set(Mutex::new(Some(StartupArchivePrefetch{path,worker})));
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run(){tauri::Builder::default()
+pub fn run(){
+    if let Some(code)=run_shell_extraction().or_else(run_shell_compression){std::process::exit(code);}
+    start_archive_prefetch();
+    tauri::Builder::default()
     .plugin(tauri_plugin_single_instance::init(|app,args,_cwd|handle_second_instance(app,args)))
     .plugin(tauri_plugin_dialog::init()).plugin(tauri_plugin_drag::init()).manage(DragExportState::default()).manage(ExtractState::default()).manage(CreateState::default()).manage(ConvertState::default()).manage(AddState::default()).manage(DeleteState::default())
     .invoke_handler(tauri::generate_handler![list_archive,preview_extraction,extract_archive,cancel_extraction,create_archive,cancel_compression,convert_archive,cancel_conversion,add_to_archive,cancel_add,delete_from_archive,cancel_delete,prepare_drag_export,get_shell_launch,ensure_shell_extract_folder,get_context_menu_commands,set_context_menu_commands])

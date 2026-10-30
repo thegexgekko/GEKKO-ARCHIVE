@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "GEKKO ARCHIVE",
-  "version": "0.6.4",
+  "version": "0.7.1",
   "identifier": "fr.gekkosoftware.archive",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -14,8 +14,8 @@
       {
         "label": "main",
         "title": "GEKKO ARCHIVE",
-        "width": 1380,
-        "height": 850,
+        "width": 960,
+        "height": 630,
         "minWidth": 950,
         "minHeight": 620,
         "decorations": false,
@@ -117,6 +117,27 @@
         "description": "Archive CAB (GEKKO ARCHIVE)",
         "role": "Viewer"
       }
-    ]
+    ],
+    "resources": [
+      "resources/7z.exe",
+      "resources/7z.dll",
+      "resources/LICENSE-7ZIP.txt",
+      "windows-dist/GEKKOArchiveContextV0704.dll",
+      "windows-dist/GEKKOArchiveShell-v0704.msix",
+      "windows-dist/GEKKOArchiveAssets",
+      "windows-dist/REGISTER_MENU_V070.ps1"
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "skip"
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "installerHooks": "./windows/gekko-installer-hooks.nsh",
+        "languages": [
+          "French"
+        ]
+      }
+    }
   }
 }

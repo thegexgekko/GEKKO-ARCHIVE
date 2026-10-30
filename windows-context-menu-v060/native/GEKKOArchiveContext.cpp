@@ -96,14 +96,20 @@ static HRESULT Selection(IShellItemArray* items, std::wstring& path, bool& isDir
     if (FAILED(hr)) return hr;
     PWSTR value = nullptr;
     hr = item->GetDisplayName(SIGDN_FILESYSPATH, &value);
-    SFGAOF attrs = 0;
-    if (SUCCEEDED(hr)) {
-        HRESULT attrHr = item->GetAttributes(SFGAO_FOLDER, &attrs);
-        if (FAILED(attrHr)) hr = attrHr;
-    }
     if (SUCCEEDED(hr) && value) {
         path = value;
-        isDirectory = (attrs & SFGAO_FOLDER) != 0;
+        // Ne pas employer SFGAO_FOLDER ici : l'Explorateur classe aussi
+        // certains fichiers ZIP comme dossiers virtuels dans le Shell.
+        // Pour les commandes d'extraction, seul un VRAI repertoire du
+        // systeme de fichiers doit etre considere comme un dossier.
+        const DWORD fsAttrs = GetFileAttributesW(path.c_str());
+        if (fsAttrs == INVALID_FILE_ATTRIBUTES) {
+            hr = HRESULT_FROM_WIN32(GetLastError());
+        } else {
+            isDirectory = (fsAttrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        }
+    } else if (SUCCEEDED(hr)) {
+        hr = E_FAIL;
     }
     if (value) CoTaskMemFree(value);
     item->Release();
@@ -186,6 +192,64 @@ static HRESULT SendToBridge(Action action, const std::wstring& path) {
     return S_OK;
 }
 
+static HMODULE g_module = nullptr;
+// L'extension est chargee depuis le dossier d'installation par le package sparse.
+// Identifier cet executable exclusivement depuis le chemin du module charge.
+static HRESULT StartInstalledApp() {
+    wchar_t modulePath[32768] = {};
+    const DWORD n = GetModuleFileNameW(g_module, modulePath, ARRAYSIZE(modulePath));
+    if (!n || n >= ARRAYSIZE(modulePath)) return HRESULT_FROM_WIN32(GetLastError());
+    if (!PathRemoveFileSpecW(modulePath)) return E_FAIL;
+    std::wstring exe(modulePath);
+    exe += L"\\gekko-archive.exe";
+    const DWORD attr = GetFileAttributesW(exe.c_str());
+    if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY))
+        return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+    STARTUPINFOW si = {};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi = {};
+    // lpApplicationName ne passe pas par le shell et ne risque pas une injection de commande.
+    if (!CreateProcessW(exe.c_str(), nullptr, nullptr, nullptr, FALSE, 0, nullptr,
+                        modulePath, &si, &pi)) return HRESULT_FROM_WIN32(GetLastError());
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return S_OK;
+}
+
+
+// Execution headless : pas de pont React, pas d'activation de la fenetre.
+// CreateProcessW recoit l'application explicitement (aucun cmd.exe/shell).
+static HRESULT StartBackgroundOperation(Action action, const std::wstring& selectedPath) {
+    wchar_t directory[32768] = {};
+    const DWORD len=GetModuleFileNameW(g_module,directory,ARRAYSIZE(directory));
+    if (!len || len>=ARRAYSIZE(directory) || !PathRemoveFileSpecW(directory))
+        return HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND);
+    const std::wstring exe=std::wstring(directory)+L"\\gekko-archive.exe";
+    const DWORD attr=GetFileAttributesW(exe.c_str());
+    if(attr==INVALID_FILE_ATTRIBUTES || (attr&FILE_ATTRIBUTE_DIRECTORY))
+        return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+    // Un nom de fichier Windows ne peut contenir de guillemet. Le chemin est
+    // issu de SIGDN_FILESYSPATH, jamais d'une ligne de commande utilisateur.
+    std::wstring command=L"\""+exe+L"\" ";
+    if (action==Action::Zip || action==Action::SevenZip) {
+        command+=L"--gekko-shell-compress ";
+        command+=(action==Action::Zip ? L"zip" : L"7z");
+    } else {
+        command+=L"--gekko-shell-extract ";
+        command+=(action==Action::ExtractHere ? L"here" : L"folder");
+    }
+    command += L" \""+selectedPath+L"\"";
+    STARTUPINFOW si={}; si.cb=sizeof(si);
+    si.dwFlags=STARTF_USESHOWWINDOW; si.wShowWindow=SW_HIDE;
+    PROCESS_INFORMATION pi={};
+    if(!CreateProcessW(exe.c_str(),command.data(),nullptr,nullptr,FALSE,
+                       CREATE_NO_WINDOW,nullptr,directory,&si,&pi))
+        return HRESULT_FROM_WIN32(GetLastError());
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return S_OK;
+}
+
 class GekkoCommand final : public IExplorerCommand {
     std::atomic<ULONG> refs_{1};
     const Action action_;
@@ -222,27 +286,28 @@ public:
     }
     HRESULT STDMETHODCALLTYPE GetState(IShellItemArray* items, BOOL, EXPCMDSTATE* state) override {
         if (!state) return E_POINTER;
-        if (!CommandEnabled(action_)) { *state=ECS_HIDDEN; return S_OK; }
-        // Le Shell peut interroger GetState sans fournir une selection exploitable.
-        // Dans ce cas, ne PAS cacher silencieusement une commande de compression.
-        // ZIP et 7z acceptent tout fichier : restent donc visibles sans I/O.
+        if (!CommandEnabled(action_)) { *state = ECS_HIDDEN; return S_OK; }
+        // ZIP/7z peuvent compresser un fichier ordinaire comme un dossier.
         if (action_ == Action::Zip || action_ == Action::SevenZip) {
             *state = ECS_ENABLED;
             return S_OK;
         }
-        // Les commandes d'ouverture/extraction sont visibles mais inactives
-        // si la selection n'est pas reconnue comme archive.
-        *state = ECS_DISABLED;
+        // Windows 11 peut appeler GetState sans selection exploitable. Ne pas
+        // griser une vraie archive sur la seule absence de ces informations.
+        // Invoke reverifie TOUJOURS la selection reelle avant toute action.
+        *state = ECS_ENABLED;
         if (!items) return S_OK;
-        DWORD count = 0;
-        if (FAILED(items->GetCount(&count)) || count != 1) return S_OK;
-        IShellItem* item = nullptr;
-        if (FAILED(items->GetItemAt(0, &item)) || !item) return S_OK;
-        PWSTR name = nullptr;
-        const HRESULT hr = item->GetDisplayName(SIGDN_NORMALDISPLAY, &name);
-        if (SUCCEEDED(hr) && name && IsArchive(name)) *state = ECS_ENABLED;
-        if (name) CoTaskMemFree(name);
-        item->Release();
+        std::wstring path;
+        bool folder = false;
+        // Selection() utilise SIGDN_FILESYSPATH, qui conserve l'extension,
+        // contrairement a SIGDN_NORMALDISPLAY (extensions parfois masquees).
+        const HRESULT hr = Selection(items, path, folder);
+        if (SUCCEEDED(hr)) {
+            *state = Supports(action_, path, folder) ? ECS_ENABLED : ECS_DISABLED;
+        } else if (hr == HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED)) {
+            // Plusieurs elements : la version actuelle ne traite qu'un objet.
+            *state = ECS_DISABLED;
+        }
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE Invoke(IShellItemArray* items, IBindCtx*) override {
@@ -251,13 +316,27 @@ public:
         HRESULT hr = Selection(items, path, folder);
         if (FAILED(hr)) return hr;
         if (!Supports(action_, path, folder)) return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
-        if (!IsGekkoRunning()) {
-            MessageBoxW(nullptr, L"Lance GEKKO ARCHIVE avant d'utiliser cette commande.\n"
-                L"Le logiciel doit rester ouvert pendant ce test Alpha.",
-                L"GEKKO ARCHIVE", MB_OK | MB_ICONINFORMATION);
-            return HRESULT_FROM_WIN32(ERROR_SERVICE_NOT_ACTIVE);
+        // Les quatre operations ZIP/7z/extraction sont independantes de React.
+        // Seule l'action Ouvrir affiche l'interface principale.
+        if (action_!=Action::Open)
+            return StartBackgroundOperation(action_, path);
+        // Garder la commande en file avant le demarrage : le backend la recupere
+        // avec son pont V0.5.0, y compris si l'application etait fermee.
+        const bool alreadyRunning = IsGekkoRunning();
+        if (!alreadyRunning) {
+            wchar_t directory[32768] = {};
+            const DWORD len = GetModuleFileNameW(g_module, directory, ARRAYSIZE(directory));
+            if (!len || len >= ARRAYSIZE(directory) || !PathRemoveFileSpecW(directory))
+                return HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND);
+            const std::wstring exe = std::wstring(directory) + L"\\gekko-archive.exe";
+            const DWORD attr = GetFileAttributesW(exe.c_str());
+            if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY))
+                return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
         }
-        return SendToBridge(action_, path);
+        hr = SendToBridge(action_, path);
+        if (FAILED(hr)) return hr;
+        if (!alreadyRunning) return StartInstalledApp();
+        return S_OK;
     }
     HRESULT STDMETHODCALLTYPE GetFlags(EXPCMDFLAGS* flags) override {
         if (!flags) return E_POINTER;
@@ -317,4 +396,7 @@ STDAPI DllGetClassObject(REFCLSID clsid, REFIID riid, void** result) {
 STDAPI DllCanUnloadNow(void) {
     return g_objects.load() == 0 ? S_OK : S_FALSE;
 }
-BOOL WINAPI DllMain(HINSTANCE, DWORD, LPVOID) { return TRUE; }
+BOOL WINAPI DllMain(HINSTANCE module, DWORD reason, LPVOID) {
+    if (reason == DLL_PROCESS_ATTACH) g_module = module;
+    return TRUE;
+}

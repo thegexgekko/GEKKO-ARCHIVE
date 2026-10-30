@@ -74,3 +74,8 @@ Les dossiers `node_modules/`, `dist/` et `src-tauri/target/` ainsi que les archi
 ## Avertissement
 
 Version Alpha : tests Windows supplémentaires requis avant toute utilisation sur des données importantes. Ce dépôt ne publie pas de licence open source globale pour le code et les illustrations GEKKO.
+
+
+## V0.7.1 Alpha — Windows 11
+
+Version installée testée : correction du menu contextuel, compression ZIP/7z et extraction silencieuses, fenêtre 960 × 630 et ouverture des archives au démarrage fortement accélérée. Installateur NSIS mesuré à 7,51 Mo ; application installée à 17,4 Mo (hors ressources système partagées). Consulter [le bilan et les réserves de la V0.7.1](VERSIONS/V0.7.1_ALPHA.md). Les binaires compilés et certificats de signature ne sont pas versionnés.
