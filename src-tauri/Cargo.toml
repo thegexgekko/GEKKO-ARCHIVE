@@ -1,6 +1,6 @@
 [package]
 name = "gekko-archive"
-version = "0.6.2"
+version = "0.6.4"
 description = "GEKKO ARCHIVE — utilitaire local Windows 11"
 authors = ["GEKKO SOFTWARE"]
 edition = "2021"
@@ -22,3 +22,6 @@ tauri-plugin-drag = "2.1.1"
 
 # Evite une seconde fenetre lors du double-clic sur une archive deja ouverte.
 tauri-plugin-single-instance = "2"
+
+# Décodage Zstandard autonome (zstd-rs MIT, bibliothèque zstd sous BSD/GPLv2).
+zstd = "0.13"

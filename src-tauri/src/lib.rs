@@ -101,7 +101,60 @@ fn parse_listing(s:&str)->Vec<ArchiveFile>{
     }
     if let Some(f)=fields_to_file(&v){files.push(f);}files
 }
-fn read_listing(archive:&Path,password:Option<&str>)->Result<Vec<ArchiveFile>,String>{
+// TAR.GZ, TAR.XZ et TAR.BZ2 contiennent un TAR. Ne jamais extraire
+// directement ce TAR dans un dossier utilisateur : flux vers une zone isolée.
+fn is_layered_tar(archive:&Path)->bool{
+    let n=archive.file_name().unwrap_or_default().to_string_lossy().to_ascii_lowercase();
+    n.ends_with(".tar.gz")||n.ends_with(".tar.xz")||n.ends_with(".tar.bz2")
+}
+fn is_zstd_file(archive:&Path)->bool{
+    archive.extension().and_then(|x|x.to_str()).is_some_and(|x|x.eq_ignore_ascii_case("zst"))
+}
+fn zstd_member(archive:&Path)->Result<String,String>{
+    let name=archive.file_name().and_then(|v|v.to_str()).ok_or("Nom ZSTD invalide.")?;
+    let stem=name.get(..name.len().saturating_sub(4)).ok_or("Nom ZSTD invalide.")?;
+    safe_member(stem)?;
+    Ok(stem.to_string())
+}
+fn zstd_listing(archive:&Path)->Result<Vec<ArchiveFile>,String>{
+    if !archive.is_file(){return Err("Archive ZSTD introuvable.".into());}
+    let source=fs::File::open(archive).map_err(|e|e.to_string())?;
+    let mut decoder=zstd::stream::read::Decoder::new(source)
+        .map_err(|e|format!("Impossible de lire le flux ZSTD : {e}"))?;
+    let mut bytes=[0u8;65536];let mut total=0u64;
+    loop{
+        let n=decoder.read(&mut bytes).map_err(|e|format!("Flux ZSTD incorrect : {e}"))?;
+        if n==0{break;}
+        total=total.saturating_add(n as u64);
+    }
+    let packed=archive.metadata().map_err(|e|e.to_string())?.len();
+    Ok(vec![ArchiveFile{path:zstd_member(archive)?,size:total,packed_size:Some(packed),modified:String::new(),is_dir:false,is_link:false,link_reason:String::new()}])
+}
+fn unpack_tar_layer(archive:&Path,password:Option<&str>,cancel:Option<&AtomicBool>)->Result<(TempStage,PathBuf),String>{
+    let temp=create_stage()?;
+    let tar=temp.0.join("contenu.tar");
+    let output=fs::File::create(&tar).map_err(|e|e.to_string())?;
+    let engine=find_engine()?;
+    let mut cmd=Command::new(engine);
+    cmd.arg("e").arg("-so").arg("-y").arg("-bd").arg("-sccUTF-8");
+    if let Some(p)=password.filter(|p|!p.is_empty()){cmd.arg(format!("-p{p}"));}
+    let mut child=cmd.arg("--").arg(archive).stdin(Stdio::null())
+        .stdout(Stdio::from(output)).stderr(Stdio::null()).spawn()
+        .map_err(|e|format!("Impossible de lire l'enveloppe TAR : {e}"))?;
+    let status=loop{
+        if cancel.is_some_and(|flag|flag.load(Ordering::SeqCst)){
+            let _=child.kill();let _=child.wait();return Err("Extraction annulée.".into());
+        }
+        match child.try_wait().map_err(|e|e.to_string())?{
+            Some(status)=>break status,
+            None=>std::thread::sleep(Duration::from_millis(100)),
+        }
+    };
+    if !status.success(){return Err("Impossible de décompresser l'enveloppe TAR.GZ/XZ/BZ2. Vérifie son intégrité.".into());}
+    if !tar.is_file(){return Err("Le TAR interne est introuvable.".into());}
+    Ok((temp,tar))
+}
+fn read_listing_single(archive:&Path,password:Option<&str>)->Result<Vec<ArchiveFile>,String>{
     let engine=find_engine()?;
     let mut cmd=Command::new(engine);
     cmd.arg("l").arg("-slt").arg("-sccUTF-8").arg("-bd");
@@ -119,6 +172,14 @@ fn read_listing(archive:&Path,password:Option<&str>)->Result<Vec<ArchiveFile>,St
     if !output.contains("----------"){return Err("Format de liste 7-Zip non reconnu.".into());}
     Ok(parse_listing(&output))
 }
+fn read_listing(archive:&Path,password:Option<&str>)->Result<Vec<ArchiveFile>,String>{
+    if is_zstd_file(archive){return zstd_listing(archive);}
+    if is_layered_tar(archive){
+        let (_stage,inner)=unpack_tar_layer(archive,password,None)?;
+        return read_listing_single(&inner,None);
+    }
+    read_listing_single(archive,password)
+}
 #[tauri::command]
 fn list_archive(archive_path:String,password:Option<String>)->Result<ArchiveInfo,String>{
     let archive=PathBuf::from(&archive_path);
@@ -126,7 +187,9 @@ fn list_archive(archive_path:String,password:Option<String>)->Result<ArchiveInfo
     if !m.is_file(){return Err("Le chemin sélectionné n'est pas une archive.".into());}
     let files=read_listing(&archive,password.as_deref())?;
     let name=archive.file_name().unwrap_or_default().to_string_lossy().into_owned();
-    let format=name.rsplit('.').next().unwrap_or("Archive").to_uppercase();
+    let format=if is_layered_tar(&archive){
+        name.rsplit_once(".tar.").map(|(_,ext)|format!("TAR.{}",ext.to_uppercase())).unwrap_or("TAR".into())
+    }else{name.rsplit('.').next().unwrap_or("Archive").to_uppercase()};
     Ok(ArchiveInfo{path:archive_path,name,format,bytes:m.len(),files})
 }
 
@@ -265,12 +328,37 @@ fn extract_worker(app:AppHandle,req:ExtractRequest,cancel:Arc<AtomicBool>)->Resu
     if files.is_empty(){return Err("Aucun fichier à extraire.".into());}
     let stage=create_stage()?;let engine=find_engine()?;
     emit_progress(&app,"extraction",0,"Préparation de l'extraction…");
-    let mut cmd=Command::new(engine);
-    cmd.arg("x").arg("-y").arg("-aoa").arg("-sccUTF-8").arg("-scsUTF-8").arg("-spd").arg("-bsp1").arg("-bb0").arg("-bso0").arg("-bse1");
     let output_dir=stage.0.join("output");
     fs::create_dir(&output_dir).map_err(|e|e.to_string())?;
+    let layered=if is_layered_tar(&archive){
+        emit_progress(&app,"extraction",3,"Décompression de l'enveloppe TAR…");
+        Some(unpack_tar_layer(&archive,req.password.as_deref(),Some(cancel.as_ref()))?)
+    }else{None};
+    if is_zstd_file(&archive){
+        let member=zstd_member(&archive)?;
+        let rel=safe_member(&member)?;
+        let file=output_dir.join(&rel);
+        let raw=fs::File::open(&archive).map_err(|e|e.to_string())?;
+        let mut decoder=zstd::stream::read::Decoder::new(raw)
+            .map_err(|e|format!("Flux ZSTD non reconnu : {e}"))?;
+        let mut target=fs::File::create(&file).map_err(|e|e.to_string())?;
+        let mut buf=[0u8;65536];
+        loop{
+            if cancel.load(Ordering::SeqCst){return Err("Extraction ZSTD annulée.".into());}
+            let n=decoder.read(&mut buf).map_err(|e|format!("Erreur de décompression ZSTD : {e}"))?;
+            if n==0{break;}
+            target.write_all(&buf[..n]).map_err(|e|format!("Écriture temporaire ZSTD impossible : {e}"))?;
+        }
+        target.sync_all().map_err(|e|e.to_string())?;
+        drop(target);
+    }else{
+    let source_archive=layered.as_ref().map(|(_,inner)|inner.as_path()).unwrap_or(archive.as_path());
+    let mut cmd=Command::new(engine);
+    cmd.arg("x").arg("-y").arg("-aoa").arg("-sccUTF-8").arg("-scsUTF-8").arg("-spd").arg("-bsp1").arg("-bb0").arg("-bso0").arg("-bse1");
     cmd.arg(format!("-o{}",output_dir.display()));
-    if let Some(password)=req.password.as_deref().filter(|p|!p.is_empty()){cmd.arg(format!("-p{password}"));}
+    if layered.is_none(){
+        if let Some(password)=req.password.as_deref().filter(|p|!p.is_empty()){cmd.arg(format!("-p{password}"));}
+    }
     // La liste de sélection évite toute ambiguïté avec les caractères joker.
     if !req.selected_paths.is_empty(){
         let list=stage.0.join("selected-files.txt");
@@ -279,7 +367,7 @@ fn extract_worker(app:AppHandle,req:ExtractRequest,cancel:Arc<AtomicBool>)->Resu
         drop(f);
         cmd.arg(format!("-i@{}",list.display()));
     }
-    cmd.arg("--").arg(&archive);
+    cmd.arg("--").arg(source_archive);
     let mut child=cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e|format!("Impossible de lancer 7-Zip : {e}"))?;
     let out=child.stdout.take().ok_or("Sortie du moteur inaccessible.")?;
     let err=child.stderr.take().ok_or("Erreurs du moteur inaccessibles.")?;
@@ -292,6 +380,7 @@ fn extract_worker(app:AppHandle,req:ExtractRequest,cancel:Arc<AtomicBool>)->Resu
     let _=progress.join();let error_text=errors.join().unwrap_or_default();
     if cancel.load(Ordering::SeqCst){return Err("Extraction annulée avant copie des fichiers.".into());}
     if !status.success(){return Err(format!("Échec 7-Zip ({}). Vérifie le mot de passe ou l'intégrité de l'archive. {}",status,error_text.chars().take(400).collect::<String>()));}
+    } // Fin de l'extraction 7-Zip ; ZSTD est traité localement par Rust.
     // La liste d'inclusion ne doit pas être copiée dans le dossier final.
     ensure_stage_safe(&output_dir)?;
     emit_progress(&app,"copie",82,"Transfert vers la destination…");
@@ -363,13 +452,20 @@ fn ensure_source_tree_safe(path:&Path)->Result<(),String>{
 
 fn validate_create(req:&CreateRequest)->Result<(PathBuf,PathBuf,Vec<String>),String>{
     let kind=req.format.to_ascii_lowercase();
-    if !matches!(kind.as_str(),"zip"|"7z"){return Err("Formats de création disponibles : ZIP et 7z.".into());}
+    if !matches!(kind.as_str(),"zip"|"7z"|"tar"|"tar.gz"|"tar.xz"|"tar.bz2"){
+        return Err("Format de création non pris en charge (ZIP, 7z, TAR, TAR.GZ, TAR.XZ, TAR.BZ2).".into());
+    }
+    if req.password.as_deref().is_some_and(|s|!s.is_empty()) && !matches!(kind.as_str(),"zip"|"7z"){
+        return Err("Le chiffrement par mot de passe est réservé aux formats ZIP et 7z.".into());
+    }
     if !matches!(req.level,0|1|5|9){return Err("Niveau de compression invalide.".into());}
     if req.source_paths.is_empty(){return Err("Sélectionne d'abord les fichiers ou un dossier à compresser.".into());}
     if req.source_paths.len()>10000{return Err("Trop de fichiers sélectionnés.".into());}
     let destination=PathBuf::from(req.destination.trim());
-    let ext=destination.extension().and_then(|e|e.to_str()).unwrap_or("");
-    if !ext.eq_ignore_ascii_case(&kind){return Err(format!("L'archive de sortie doit se terminer par .{kind}."));}
+    let filename=destination.file_name().and_then(|e|e.to_str()).unwrap_or("");
+    if !filename.to_ascii_lowercase().ends_with(&format!(".{kind}")){
+        return Err(format!("L'archive de sortie doit se terminer par .{kind}."));
+    }
     let name=destination.file_name().and_then(|n|n.to_str()).ok_or("Nom de destination invalide.")?;
     if name.starts_with('.') || (name.contains('\r') || name.contains('\n')){return Err("Nom de l'archive invalide.".into());}
     if destination.exists(){return Err("Cette archive existe déjà. Choisis un autre nom : aucun remplacement automatique.".into());}
@@ -422,6 +518,29 @@ fn compression_progress<R:Read>(mut input:R,app:AppHandle){
 fn emit_compression(app:&AppHandle,phase:&str,percent:u8,message:&str){
     let _=app.emit("gekko-compression-progress",Progress{phase:phase.into(),percent,message:message.into()});
 }
+fn create_tar_intermediate(app:&AppHandle,engine:&Path,base:&Path,tar:&Path,sources:&[String],cancel:&AtomicBool)->Result<(),String>{
+    emit_compression(app,"tar",5,"Regroupement des fichiers dans un TAR temporaire…");
+    let mut cmd=Command::new(engine);
+    let mut child=cmd.current_dir(base).arg("a").arg("-ttar").arg("-y")
+        .arg("-sccUTF-8").arg("-scsUTF-8").arg("-spd")
+        .arg("-bsp0").arg("-bso0").arg("-bse0")
+        .arg("--").arg(tar).args(sources).stdin(Stdio::null())
+        .stdout(Stdio::null()).stderr(Stdio::null()).spawn()
+        .map_err(|e|format!("Création du TAR temporaire impossible : {e}"))?;
+    let status=loop{
+        if cancel.load(Ordering::SeqCst){let _=child.kill();let _=child.wait();return Err("Compression annulée.".into());}
+        match child.try_wait().map_err(|e|e.to_string())?{
+            Some(status)=>break status,None=>std::thread::sleep(Duration::from_millis(100))
+        }
+    };
+    if !status.success() || !tar.is_file(){return Err("Échec de création du TAR intermédiaire.".into());}
+    let result=Command::new(engine).arg("t").arg("-bso0").arg("-bse0").arg("--").arg(tar)
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status()
+        .map_err(|e|format!("Test du TAR impossible : {e}"))?;
+    if cancel.load(Ordering::SeqCst){return Err("Compression annulée.".into());}
+    if !result.success(){return Err("Le TAR intermédiaire n'a pas passé la vérification d'intégrité.".into());}
+    Ok(())
+}
 fn create_worker(app:AppHandle,req:CreateRequest,cancel:Arc<AtomicBool>)->Result<CreateResult,String>{
     let (base,destination,source_names)=validate_create(&req)?;
     let engine=find_engine()?;
@@ -432,16 +551,35 @@ fn create_worker(app:AppHandle,req:CreateRequest,cancel:Arc<AtomicBool>)->Result
     if temporary.0.exists(){return Err("Un fichier de travail existe déjà, recommence l'opération.".into());}
     emit_compression(&app,"préparation",0,"Préparation des fichiers…");
     if cancel.load(Ordering::SeqCst){return Err("Compression annulée.".into());}
+    // Pour TAR.GZ, TAR.XZ et TAR.BZ2 : deux étapes, sans moteur supplémentaire.
+    let layered=kind.starts_with("tar.");
+    let intermediate=if layered{Some(create_stage()?)}else{None};
+    let tar_file=if let Some(ref stage)=intermediate{
+        let dest_name=destination.file_name().and_then(|n|n.to_str()).unwrap_or("archive.tar.gz");
+        let inner_name=dest_name.rsplit_once('.').map(|(base,_)|base).unwrap_or("archive.tar");
+        let path=stage.0.join(inner_name);
+        create_tar_intermediate(&app,&engine,&base,&path,&source_names,&cancel)?;
+        Some(path)
+    }else{None};
+    let effective_kind=match kind.as_str(){
+        "tar.gz"=>"gzip", "tar.bz2"=>"bzip2", "tar.xz"=>"xz", other=>other,
+    };
+    let effective_base=if let Some(ref stage)=intermediate{stage.0.as_path()}else{base.as_path()};
+    let effective_sources=if let Some(ref tar)=tar_file{
+        vec![format!(".\\{}",tar.file_name().unwrap_or_default().to_string_lossy())]
+    }else{source_names};
+    if cancel.load(Ordering::SeqCst){return Err("Compression annulée.".into());}
     let mut cmd=Command::new(&engine);
-    cmd.current_dir(&base).arg("a").arg(format!("-t{kind}")).arg(format!("-mx={}",req.level))
-        .arg("-y").arg("-sccUTF-8").arg("-scsUTF-8").arg("-spd")
+    cmd.current_dir(effective_base).arg("a").arg(format!("-t{effective_kind}"));
+    if effective_kind!="tar"{cmd.arg(format!("-mx={}",req.level));}
+    cmd.arg("-y").arg("-sccUTF-8").arg("-scsUTF-8").arg("-spd")
         .arg("-bsp1").arg("-bb0").arg("-bso0").arg("-bse1");
     if let Some(pass)=req.password.as_deref().filter(|p|!p.is_empty()){
         cmd.arg(format!("-p{pass}"));
         if kind=="7z" {cmd.arg("-mhe=on");}
         else {cmd.arg("-mem=AES256");}
     }
-    cmd.arg("--").arg(&temporary.0).args(&source_names);
+    cmd.arg("--").arg(&temporary.0).args(&effective_sources);
     let mut child=cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped())
         .spawn().map_err(|e|format!("Démarrage de 7-Zip impossible : {e}"))?;
     let stdout=child.stdout.take().ok_or("Progression du moteur inaccessible.")?;
@@ -778,9 +916,202 @@ fn cancel_add(state:State<'_,AddState>)->Result<(),String>{
     Ok(())
 }
 
+
+// Modification non destructive des archives ZIP / 7z : on supprime des
+// entrees de la copie et on controle les survivants avant publication.
+#[derive(Deserialize)]
+#[serde(rename_all="camelCase")]
+struct DeleteRequest {
+    archive_path:String,
+    selected_paths:Vec<String>,
+    password:Option<String>,
+}
+#[derive(Serialize)]
+#[serde(rename_all="camelCase")]
+struct DeleteResult {path:String,bytes:u64,removed:usize}
+#[derive(Default)]
+struct DeleteState {active:Mutex<Option<Arc<AtomicBool>>>}
+
+fn deletion_event(app:&AppHandle,phase:&str,percent:u8,message:&str){
+    let _=app.emit("gekko-deletion-progress",Progress{
+        phase:phase.into(),percent,message:message.into()
+    });
+}
+
+// Accepte les dossiers explicites et implicites et etend la selection a
+// leurs descendants. La selection vide ne doit jamais vouloir dire "tout".
+fn deletion_plan<'a>(listing:&'a [ArchiveFile],requested:&[String])->Result<Vec<&'a ArchiveFile>,String>{
+    if requested.is_empty(){return Err("Sélectionne au moins un fichier ou dossier à supprimer.".into());}
+    if requested.len()>10_000{return Err("Sélection trop importante.".into());}
+    // Comme pour l'extraction, refuser des noms dangereux, liens ou collisions.
+    selected_files(listing,&[])?;
+    let targets=selected_files(listing,requested)?;
+    if targets.is_empty(){return Err("Aucun élément correspondant dans l'archive.".into());}
+    Ok(targets)
+}
+
+fn delete_worker(app:AppHandle,req:DeleteRequest,cancel:Arc<AtomicBool>)->Result<DeleteResult,String>{
+    let archive=fs::canonicalize(&req.archive_path)
+        .map_err(|e|format!("Archive introuvable : {e}"))?;
+    if !archive.is_file(){return Err("Sélectionne une archive existante.".into());}
+    let kind=archive.extension().and_then(|e|e.to_str()).unwrap_or("").to_ascii_lowercase();
+    if !matches!(kind.as_str(),"zip"|"7z"){
+        return Err("La suppression est disponible uniquement pour ZIP et 7z. Les RAR ne sont pas modifiés.".into());
+    }
+    let listing=read_listing(&archive,req.password.as_deref())?;
+    let picked=deletion_plan(&listing,&req.selected_paths)?;
+    let removed:HashSet<String>=picked.iter()
+        .map(|f|member_key(&f.path).to_lowercase()).collect();
+    let expected:HashMap<String,(u64,bool)>=listing.iter()
+        .filter(|f|!removed.contains(&member_key(&f.path).to_lowercase()))
+        .map(|f|(member_key(&f.path).to_lowercase(),(f.size,f.is_dir))).collect();
+    if cancel.load(Ordering::SeqCst){return Err("Suppression annulée. Archive intacte.".into());}
+    let engine=find_engine()?;
+    let old=fs::metadata(&archive).map_err(|e|e.to_string())?;
+    let stamp=SystemTime::now().duration_since(UNIX_EPOCH)
+        .map_err(|e|e.to_string())?.as_nanos();
+    let parent=archive.parent().ok_or("Répertoire de l'archive inaccessible.")?;
+    let temp=TemporaryArchive(parent.join(format!(".gekko-delete-{}-{stamp}.{kind}",std::process::id())));
+    let listfile=TemporaryArchive(parent.join(format!(".gekko-delete-{}-{stamp}.txt",std::process::id())));
+    let backup=parent.join(format!(".gekko-restore-{}-{stamp}.{kind}",std::process::id()));
+    if temp.0.exists()||listfile.0.exists()||backup.exists(){
+        return Err("Fichier de travail déjà présent. Aucune modification.".into());
+    }
+    deletion_event(&app,"préparation",0,"Création de la copie de travail…");
+    fs::copy(&archive,&temp.0).map_err(|e|format!("Copie de travail impossible (espace disque ?) : {e}"))?;
+    if cancel.load(Ordering::SeqCst){return Err("Suppression annulée. Archive intacte.".into());}
+    // Liste UTF-8 : évite de dépasser la longueur maximale de la ligne de
+    // commande Windows lorsque plusieurs centaines de fichiers sont choisis.
+    let mut lines=String::new();
+    for f in &picked{lines.push_str(&member_key(&f.path));lines.push('\n');}
+    {
+        let mut file=fs::OpenOptions::new().write(true).create_new(true).open(&listfile.0)
+            .map_err(|e|format!("Liste temporaire impossible : {e}"))?;
+        file.write_all(lines.as_bytes()).map_err(|e|format!("Liste temporaire impossible : {e}"))?;
+        file.sync_all().map_err(|e|e.to_string())?;
+    }
+    let mut cmd=Command::new(&engine);
+    cmd.arg("d").arg("-y").arg("-sccUTF-8").arg("-scsUTF-8")
+        .arg("-spd").arg("-bsp1").arg("-bb0").arg("-bso0").arg("-bse1");
+    if let Some(pass)=req.password.as_deref().filter(|p|!p.is_empty()){
+        cmd.arg(format!("-p{pass}"));
+    }
+    // Ne PAS utiliser -- : ce commutateur désactive aussi la lecture des @listfiles.
+    // Le chemin d’archive est absolu et ne peut pas être pris pour un switch.
+    cmd.arg(&temp.0).arg(format!("@{}",listfile.0.display()));
+    deletion_event(&app,"suppression",10,"Retrait des éléments de la copie…");
+    let mut child=cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped())
+        .spawn().map_err(|e|format!("Démarrage de 7-Zip impossible : {e}"))?;
+    let stdout=child.stdout.take().ok_or("Progression de 7-Zip inaccessible.")?;
+    let stderr=child.stderr.take().ok_or("Diagnostics de 7-Zip inaccessibles.")?;
+    let progapp=app.clone();
+    let progress=std::thread::spawn(move||{
+        let mut input=std::io::BufReader::new(stdout);
+        let mut buffer=[0u8;8192];let mut token=Vec::new();
+        while let Ok(n)=input.read(&mut buffer){if n==0{break;}
+            for b in &buffer[..n]{
+                if *b==b'\r'||*b==b'\n'{
+                    let s=String::from_utf8_lossy(&token);
+                    for word in s.split_whitespace(){
+                        if let Some(p)=word.strip_suffix('%').and_then(|v|v.parse::<u8>().ok()){
+                            deletion_event(&progapp,"suppression",10+(p.min(100) as u16*70/100) as u8,"Suppression en cours…");break;
+                        }
+                    }
+                    token.clear();
+                }else if token.len()<4096{token.push(*b);}
+            }
+        }
+    });
+    let errors=std::thread::spawn(move||{
+        let mut s=String::new();let _=std::io::BufReader::new(stderr).read_to_string(&mut s);s
+    });
+    let status=loop{
+        if cancel.load(Ordering::SeqCst){let _=child.kill();break child.wait().map_err(|e|e.to_string())?;}
+        match child.try_wait().map_err(|e|e.to_string())?{
+            Some(code)=>break code,None=>std::thread::sleep(Duration::from_millis(100))
+        }
+    };
+    let _=progress.join();let diagnostics=errors.join().unwrap_or_default();
+    if cancel.load(Ordering::SeqCst){return Err("Suppression annulée. Archive originale intacte.".into());}
+    if !status.success(){return Err(format!("Suppression 7-Zip impossible ({status}) : {}. Archive originale intacte.",diagnostics.chars().take(500).collect::<String>()));}
+    deletion_event(&app,"vérification",85,"Contrôle de l'archive et des fichiers conservés…");
+    let mut verify=Command::new(&engine);
+    verify.arg("t").arg("-y").arg("-bso0").arg("-bsp0").arg("-bse0");
+    if let Some(pass)=req.password.as_deref().filter(|p|!p.is_empty()){
+        verify.arg(format!("-p{pass}"));
+    }
+    let mut check=verify.arg("--").arg(&temp.0)
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+        .spawn().map_err(|e|format!("Vérification impossible : {e}"))?;
+    let verified=loop{
+        if cancel.load(Ordering::SeqCst){let _=check.kill();break check.wait().map_err(|e|e.to_string())?;}
+        match check.try_wait().map_err(|e|e.to_string())?{
+            Some(code)=>break code,None=>std::thread::sleep(Duration::from_millis(100))
+        }
+    };
+    if cancel.load(Ordering::SeqCst){return Err("Suppression annulée. Archive originale intacte.".into());}
+    if !verified.success(){return Err("Vérification de l'archive modifiée échouée. Originale conservée.".into());}
+    let after=read_listing(&temp.0,req.password.as_deref())?;
+    let actual:HashMap<String,(u64,bool)>=after.iter()
+        .map(|f|(member_key(&f.path).to_lowercase(),(f.size,f.is_dir))).collect();
+    if actual!=expected{
+        return Err("Contenu inattendu après suppression : l'archive originale est conservée.".into());
+    }
+    let current=fs::metadata(&archive).map_err(|e|e.to_string())?;
+    if old.len()!=current.len()||old.modified().ok()!=current.modified().ok(){
+        return Err("L'archive source a changé pendant l'opération : suppression abandonnée.".into());
+    }
+    if cancel.load(Ordering::SeqCst){return Err("Suppression annulée. Archive originale intacte.".into());}
+    deletion_event(&app,"enregistrement",96,"Publication de l'archive vérifiée…");
+    fs::rename(&archive,&backup).map_err(|e|format!("Archive verrouillée, suppression annulée : {e}"))?;
+    if let Err(e)=fs::rename(&temp.0,&archive){
+        return match fs::rename(&backup,&archive){
+            Ok(())=>Err(format!("Modification non effectuée : {e}. Archive originale restaurée.")),
+            Err(rollback)=>Err(format!("ERREUR : remplacement impossible ({e}) et restauration impossible ({rollback}). Archive originale préservée ici : {}",backup.display()))
+        };
+    }
+    let _=fs::remove_file(&backup);
+    let bytes=fs::metadata(&archive).map_err(|e|e.to_string())?.len();
+    deletion_event(&app,"terminé",100,"Suppression terminée. Archive vérifiée.");
+    Ok(DeleteResult{path:archive.to_string_lossy().into_owned(),bytes,removed:removed.len()})
+}
+
+#[tauri::command]
+async fn delete_from_archive(app:AppHandle,state:State<'_,DeleteState>,req:DeleteRequest)->Result<DeleteResult,String>{
+    let flag=Arc::new(AtomicBool::new(false));
+    {
+        let mut current=state.active.lock().map_err(|e|e.to_string())?;
+        if current.is_some(){return Err("Une suppression est déjà en cours.".into());}
+        *current=Some(flag.clone());
+    }
+    let outcome=tauri::async_runtime::spawn_blocking(move||delete_worker(app,req,flag)).await
+        .map_err(|e|format!("Erreur de tâche : {e}"));
+    *state.active.lock().map_err(|e|e.to_string())?=None;
+    outcome?
+}
+#[tauri::command]
+fn cancel_delete(state:State<'_,DeleteState>)->Result<(),String>{
+    if let Some(flag)=state.active.lock().map_err(|e|e.to_string())?.as_ref(){
+        flag.store(true,Ordering::SeqCst);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn deletion_rejects_empty_selection(){
+        assert!(deletion_plan(&[],&[]).is_err());
+    }
+    #[test]
+    fn deletion_of_folder_includes_contents(){
+        let all=vec![ArchiveFile{path:"dir/a.txt".into(),size:1,packed_size:None,modified:String::new(),is_dir:false,is_link:false,link_reason:String::new()},
+            ArchiveFile{path:"b.txt".into(),size:2,packed_size:None,modified:String::new(),is_dir:false,is_link:false,link_reason:String::new()}];
+        let result=deletion_plan(&all,&["dir".into()]).unwrap();
+        assert_eq!(result.len(),1);
+        assert_eq!(member_key(&result[0].path),"dir/a.txt");
+    }
     #[test]
     fn incoming_rejects_path_traversal_and_reserved_names(){
         for name in ["../secret.txt", "CON.txt", "C:/bad.txt", "a/../../b"]{
@@ -1187,6 +1518,6 @@ fn set_context_menu_commands(commands:Vec<String>)->Result<(),String>{
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run(){tauri::Builder::default()
     .plugin(tauri_plugin_single_instance::init(|app,args,_cwd|handle_second_instance(app,args)))
-    .plugin(tauri_plugin_dialog::init()).plugin(tauri_plugin_drag::init()).manage(DragExportState::default()).manage(ExtractState::default()).manage(CreateState::default()).manage(ConvertState::default()).manage(AddState::default())
-    .invoke_handler(tauri::generate_handler![list_archive,preview_extraction,extract_archive,cancel_extraction,create_archive,cancel_compression,convert_archive,cancel_conversion,add_to_archive,cancel_add,prepare_drag_export,get_shell_launch,ensure_shell_extract_folder,get_context_menu_commands,set_context_menu_commands])
+    .plugin(tauri_plugin_dialog::init()).plugin(tauri_plugin_drag::init()).manage(DragExportState::default()).manage(ExtractState::default()).manage(CreateState::default()).manage(ConvertState::default()).manage(AddState::default()).manage(DeleteState::default())
+    .invoke_handler(tauri::generate_handler![list_archive,preview_extraction,extract_archive,cancel_extraction,create_archive,cancel_compression,convert_archive,cancel_conversion,add_to_archive,cancel_add,delete_from_archive,cancel_delete,prepare_drag_export,get_shell_launch,ensure_shell_extract_folder,get_context_menu_commands,set_context_menu_commands])
     .run(tauri::generate_context!()).expect("Impossible de lancer GEKKO ARCHIVE");}

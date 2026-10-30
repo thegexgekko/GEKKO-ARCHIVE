@@ -51,6 +51,15 @@ Après lancement de GEKKO ARCHIVE, glisser un fichier ou dossier sur `TESTER_PON
 - Les moteurs d'archives, le pont Windows V0.5.0 et les autres fonctions validées restent inchangés.
 - **À venir :** installateur complet et désinstallation propre ; le script de mise à jour actuel ne remplace pas un installateur utilisateur final.
 
+## V0.6.3 et V0.6.4 Alpha — suppression et formats supplémentaires (30 octobre 2026)
+
+- **V0.6.3** : suppression de fichiers ou dossiers dans les archives ZIP et 7z, validée sur Windows 11 ; confirmation avant modification et remplacement sécurisé après vérification. La modification des RAR n’est pas prise en charge.
+- **V0.6.4 — création** : ZIP, 7z, TAR, TAR.GZ, TAR.XZ et TAR.BZ2. Les formats TAR compressés sont traités en deux étapes.
+- **V0.6.4 — ouverture et extraction** : ZIP, 7z, RAR, TAR, GZIP, XZ, BZIP2, ZSTD, ISO et CAB. Les couches TAR compressées sont gérées automatiquement et ZSTD est décodé par une bibliothèque libre dans le backend Rust.
+- Les scripts facultatifs `ENREGISTRER_ASSOCIATIONS_WINDOWS_V064.bat` et `RETIRER_ASSOCIATIONS_WINDOWS_V064.bat` proposent les extensions dans « Ouvrir avec », sans imposer d’application par défaut.
+- Tests des nouveautés confirmés sur Windows 11. Archives de démonstration, binaires, certificats et packages compilés exclus du dépôt.
+- **À venir** : installateur de distribution Windows 11 avec désinstallation propre.
+
 ## Structure
 
 - `src/` : interface React, illustrations GEKKO ARCHIVE.

@@ -22,6 +22,11 @@ const actions = [
   {id:'convert',text:'Convertir une archive',icon:'repeat'}
 ];
 // Les preferences d'interface sont propres a GEKKO ARCHIVE et persistent entre deux lancements.
+const CREATE_FORMATS=[['7z','7z'],['zip','ZIP'],['tar','TAR'],['tar.gz','TAR.GZ'],['tar.xz','TAR.XZ'],['tar.bz2','TAR.BZ2']];
+const SUPPORTED_OPEN_EXTENSIONS=['zip','7z','rar','tar','gz','xz','bz2','zst','iso','cab','wim','arj','lzma'];
+const SUPPORTED_SUFFIX=/\.(?:tar\.(?:gz|xz|bz2)|7z|zip|rar|tar|gz|xz|bz2|zst|iso|cab)$/i;
+function stripArchiveExtension(value){return String(value).replace(SUPPORTED_SUFFIX,'');}
+function createFormatSupportedPassword(format){return format==='7z'||format==='zip';}
 const APPEARANCE_KEY='gekko.archive.appearance.v1';
 function appearanceSetting(key,fallback){
   try {const v=JSON.parse(localStorage.getItem(APPEARANCE_KEY)||'{}');return v[key]??fallback;}
@@ -142,7 +147,7 @@ function CreationDialog({onClose,onCreated,initialSources=[],initialFormat='7z',
     if(!paths.length)return '';
     const dir=archiveParentDirectory(paths[0]);
     const basename=paths.length===1?leaf(paths[0]):'Nouvelle_archive';
-    const base=basename.replace(/\.(7z|zip|rar|tar|gz|xz)$/i,'')||'Nouvelle_archive';
+    const base=stripArchiveExtension(basename)||'Nouvelle_archive';
     return (dir.endsWith('\\')||dir.endsWith('/')?dir:dir+'\\')+base+'.'+fmt;
   }
   async function chooseFiles(directory){
@@ -156,19 +161,21 @@ function CreationDialog({onClose,onCreated,initialSources=[],initialFormat='7z',
   }
   function changeFormat(fmt){
     setFormat(fmt);
-    setDestination(prev=>prev?prev.replace(/\.(7z|zip)$/i,'')+'.'+fmt:suggestedOutput(sources,fmt));
+    setDestination(prev=>prev?stripArchiveExtension(prev)+'.'+fmt:suggestedOutput(sources,fmt));
+    if(!createFormatSupportedPassword(fmt)){setPassword('');setPasswordConfirm('');}
   }
   async function chooseDestination(){
     try{
       const chosen=await save({defaultPath:destination||'Nouvelle_archive.'+format,
         filters:[{name:format.toUpperCase(),extensions:[format]}]});
-      if(chosen)setDestination(/\.(zip|7z)$/i.test(chosen)?chosen:chosen+'.'+format);
+      if(chosen)setDestination(chosen.toLowerCase().endsWith('.'+format)?chosen:stripArchiveExtension(chosen)+'.'+format);
     }catch(e){setError(String(e));}
   }
   async function launch(){
     if(busy)return;
     if(!sources.length){setError('Sélectionne des fichiers ou un dossier source.');return;}
     if(!destination.trim()){setError("Choisis l'emplacement de l'archive.");return;}
+    if(!createFormatSupportedPassword(format)&&password){setError('Le chiffrement est disponible uniquement pour ZIP et 7z.');return;}
     if(password!==passwordConfirm){setError('Les deux mots de passe ne correspondent pas.');return;}
     setError('');setBusy(true);setCancelAsked(false);
     setProgress({phase:'préparation',percent:0,message:'Préparation…'});
@@ -188,11 +195,11 @@ function CreationDialog({onClose,onCreated,initialSources=[],initialFormat='7z',
     </div>
     <label className="field">Emplacement et nom de l'archive</label>
     <div className="extract-destination"><input value={destination} disabled={busy} onChange={e=>setDestination(e.target.value)} placeholder="Dossier\\Archive.7z"/><button className="toolbtn" disabled={busy} onClick={chooseDestination}><Icon name="folder-open"/> Parcourir</button></div>
-    <div className="extract-grid"><label className="field">Format<select value={format} disabled={busy} onChange={e=>changeFormat(e.target.value)}><option value="7z">7z</option><option value="zip">ZIP</option></select></label>
-      <label className="field">Niveau de compression<select value={level} disabled={busy} onChange={e=>setLevel(e.target.value)}><option value="0">Sans compression</option><option value="1">Rapide</option><option value="5">Normal</option><option value="9">Maximum</option></select></label></div>
-    <div className="extract-grid"><label className="field">Mot de passe (facultatif)<input type="password" autoComplete="new-password" disabled={busy} value={password} onChange={e=>setPassword(e.target.value)}/></label>
-      <label className="field">Confirmer le mot de passe<input type="password" autoComplete="new-password" disabled={busy} value={passwordConfirm} onChange={e=>setPasswordConfirm(e.target.value)}/></label></div>
-    {password&&<p className="fine-print">Chiffrement AES-256. En 7z, le nom des fichiers est également masqué ; en ZIP, les noms restent visibles.</p>}
+    <div className="extract-grid"><label className="field">Format<select value={format} disabled={busy} onChange={e=>changeFormat(e.target.value)}>{CREATE_FORMATS.map(([value,label])=><option key={value} value={value}>{label}</option>)}</select></label>
+      <label className="field">Niveau de compression<select value={level} disabled={busy||format==='tar'} onChange={e=>setLevel(e.target.value)}><option value="0">Sans compression</option><option value="1">Rapide</option><option value="5">Normal</option><option value="9">Maximum</option></select></label></div>
+    {createFormatSupportedPassword(format)?<div className="extract-grid"><label className="field">Mot de passe (facultatif)<input type="password" autoComplete="new-password" disabled={busy} value={password} onChange={e=>setPassword(e.target.value)}/></label>
+      <label className="field">Confirmer le mot de passe<input type="password" autoComplete="new-password" disabled={busy} value={passwordConfirm} onChange={e=>setPasswordConfirm(e.target.value)}/></label></div>:<p className="fine-print">Ce format ne prend pas en charge le chiffrement. TAR regroupe les fichiers sans compression ; TAR.GZ, TAR.XZ et TAR.BZ2 utilisent deux couches.</p>}
+    {password&&createFormatSupportedPassword(format)&&<p className="fine-print">Chiffrement AES-256. En 7z, les noms peuvent être masqués ; en ZIP, ils restent visibles.</p>}
     {busy&&<div className="extract-progress" role="status"><div className="extract-progress-caption"><span>{progress.message||'Compression en cours…'}</span><strong>{progress.percent}%</strong></div><div className="extract-track"><div style={{width:`${progress.percent}%`}}/></div></div>}
     {error&&<div role="alert" className="error-message">{error}</div>}
     {result&&<div role="status" className="extract-success"><Icon name="check"/><strong>Archive créée et vérifiée</strong><p>{result.path}<br/>{bytes(result.bytes)}</p></div>}
@@ -201,6 +208,53 @@ function CreationDialog({onClose,onCreated,initialSources=[],initialFormat='7z',
       {!busy&&result&&<button className="toolbtn primary" onClick={()=>{onClose();onCreated(result,true);}}><Icon name="folder-open"/> Ouvrir l'archive</button>}
     </div>
     <p className="fine-print">Aucun fichier source n'est modifié. Une archive existante n'est jamais écrasée automatiquement.</p>
+  </section></div>;
+}
+
+function DeleteDialog({archive,selected,defaultPassword,onClose,onDeleted}) {
+  const [password,setPassword]=useState(defaultPassword||'');
+  const [busy,setBusy]=useState(false);
+  const [cancelAsked,setCancelAsked]=useState(false);
+  const [error,setError]=useState('');
+  const [result,setResult]=useState(null);
+  const [progress,setProgress]=useState({percent:0,message:''});
+  useEffect(()=>{
+    let active=true;let off;
+    listen('gekko-deletion-progress',e=>{if(active)setProgress(e.payload);})
+      .then(unlisten=>{if(active)off=unlisten;else unlisten();}).catch(()=>{});
+    return ()=>{active=false;off?.();};
+  },[]);
+  async function remove(){
+    if(busy||!selected.length)return;
+    setBusy(true);setCancelAsked(false);setError('');setResult(null);
+    setProgress({percent:0,message:'Préparation de la copie…'});
+    try {
+      const r=await invoke('delete_from_archive',{req:{
+        archivePath:archive.path,selectedPaths:selected,password:password||null
+      }});
+      setResult(r);
+      await onDeleted(r,password);
+    } catch(e){setError(String(e));}
+    finally{setBusy(false);}
+  }
+  async function cancel(){
+    setCancelAsked(true);
+    try{await invoke('cancel_delete');}catch(e){setError(String(e));}
+  }
+  return <div className="extract-overlay" role="presentation"><section className="extract-modal" role="dialog" aria-modal="true" aria-label="Supprimer de l’archive">
+    <div className="extract-header"><Icon name="trash"/><h2>Supprimer de l’archive</h2><button className="iconbtn" disabled={busy} onClick={onClose} aria-label="Fermer"><Icon name="close"/></button></div>
+    <div className="extract-summary"><strong>{archive.name}</strong><span>{selected.length} élément(s) sélectionné(s)</span></div>
+    <p className="delete-confirm-note">Les éléments suivants seront supprimés de l’archive. Les dossiers sélectionnés incluent tous leurs fichiers et sous-dossiers.</p>
+    <div className="create-path-list delete-path-list">{selected.map(s=><div key={s}>{s}</div>)}</div>
+    <label className="field">Mot de passe de l’archive (si nécessaire)<input type="password" autoComplete="off" disabled={busy} value={password} onChange={e=>setPassword(e.target.value)} placeholder="Laisser vide si l’archive n’est pas protégée"/></label>
+    {busy&&<div className="extract-progress" role="status"><div className="extract-progress-caption"><span>{progress.message||'Suppression en cours…'}</span><strong>{progress.percent}%</strong></div><div className="extract-track"><div style={{width:`${progress.percent}%`}}/></div></div>}
+    {error&&<div role="alert" className="error-message">{error}</div>}
+    {result&&<div className="extract-success" role="status"><Icon name="check"/><strong>Archive mise à jour et vérifiée</strong><p>{result.removed} entrée(s) supprimée(s). Les autres fichiers sont conservés.</p></div>}
+    <div className="extract-footer">
+      {busy?<button className="toolbtn" disabled={cancelAsked} onClick={cancel}>{cancelAsked?'Annulation demandée…':'Annuler la suppression'}</button>:<button className="toolbtn" onClick={onClose}>{result?'Fermer':'Annuler'}</button>}
+      {!busy&&!result&&<button className="toolbtn danger" onClick={remove}><Icon name="trash"/> Confirmer la suppression</button>}
+    </div>
+    <p className="fine-print">ZIP et 7z uniquement. Une copie est modifiée puis vérifiée avant remplacement ; l’archive originale reste intacte en cas d’échec.</p>
   </section></div>;
 }
 
@@ -300,7 +354,7 @@ function ConversionDialog({archive,defaultPassword,onClose,onConverted}) {
   async function chooseSource(){
     if(busy)return;
     try {
-      const path=await open({multiple:false,directory:false,filters:[{name:'Archives',extensions:['zip','7z','rar','tar','gz','bz2','xz','zst','cab','iso','wim','arj','lzma']}]});
+      const path=await open({multiple:false,directory:false,filters:[{name:'Archives',extensions:SUPPORTED_OPEN_EXTENSIONS}]});
       if(path){const next=suggestedFormat(path);setSource(path);setFormat(next);setDestination(suggestedDestination(path,next));setSourcePassword(path===archive?.path?defaultPassword||'':'');setResult(null);setError('');}
     }catch(e){setError(String(e));}
   }
@@ -508,6 +562,7 @@ export default function App(){
   const [createOpen,setCreateOpen]=useState(false);
   const [convertOpen,setConvertOpen]=useState(false);
   const [addOpen,setAddOpen]=useState(false);
+  const [deleteOpen,setDeleteOpen]=useState(false);
   const [droppedSources,setDroppedSources]=useState([]);
   const [extractLaunch,setExtractLaunch]=useState(null);
   const [dropHint,setDropHint]=useState('');
@@ -517,7 +572,7 @@ export default function App(){
   const popupTimer=useRef(null);
   const dropContext=useRef(null);
   const handleNativeDrop=useRef(null);
-  dropContext.current={archive,archivePassword,selected,route,busy,addOpen,extractOpen,createOpen,convertOpen};
+  dropContext.current={archive,archivePassword,selected,route,busy,addOpen,deleteOpen,extractOpen,createOpen,convertOpen};
   // Après la sélection, prépare uniquement les éléments sélectionnés.
   // Le navigateur seul ne peut pas transférer des fichiers d'archive vers
   // Explorer ; le plugin Tauri lance un glisser natif sur de vrais chemins.
@@ -726,7 +781,7 @@ export default function App(){
     if(busy)return;
     if(!window.__TAURI_INTERNALS__){setError('Cette fonction nécessite GEKKO ARCHIVE pour Windows.');setRoute('archive');return;}
     try {
-      const chosen=await open({multiple:false,directory:false,filters:[{name:'Archives',extensions:['zip','7z','rar','tar','gz','bz2','xz','zst','cab','iso','wim','arj','lzma']},{name:'Tous les fichiers',extensions:['*']}]});
+      const chosen=await open({multiple:false,directory:false,filters:[{name:'Archives',extensions:SUPPORTED_OPEN_EXTENSIONS},{name:'Tous les fichiers',extensions:['*']}]});
       if(chosen)await loadArchive(chosen);
     }catch(e){setError(String(e));setRoute('archive');}
   }
@@ -756,7 +811,7 @@ export default function App(){
       }
       notify('Dépose un dossier de destination dans la fenêtre « Extraire ».');return;
     }
-    if(context.createOpen||context.convertOpen){
+    if(context.createOpen||context.convertOpen||context.deleteOpen){
       notify('Ferme la fenêtre en cours avant un glisser-déposer.');return;
     }
     // Une archive déposée directement sur « Extraire » : extraction automatique
@@ -840,10 +895,10 @@ export default function App(){
           {error&&<div role="alert" className="error-message">{error}</div>}
           {busy&&<div className="loading-message" role="status">Lecture de l'archive en cours…</div>}
           {passwordRetry&&<div className="password-retry"><label>Mot de passe de l’archive <input type="password" autoComplete="off" value={passwordPending} onChange={e=>setPasswordPending(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')loadArchive(passwordRetry,passwordPending);}} placeholder="Saisir le mot de passe"/></label><button className="toolbtn primary" disabled={busy} onClick={()=>loadArchive(passwordRetry,passwordPending)}>Réessayer</button></div>}
-          {!archive&&!busy&&<div className="no-archive"><Icon name="archive"/><h2>Aucune archive ouverte</h2><p>Ouvre un fichier ZIP, 7z ou RAR pour parcourir ses fichiers sans les extraire.</p><button className="toolbtn primary" onClick={chooseArchive}><Icon name="folder-open"/> Ouvrir une archive</button></div>}
+          {!archive&&!busy&&<div className="no-archive"><Icon name="archive"/><h2>Aucune archive ouverte</h2><p>Ouvre une archive ZIP, 7z, RAR, TAR, GZIP, XZ, BZIP2, ZSTD, ISO ou CAB pour consulter et extraire ses fichiers.</p><button className="toolbtn primary" onClick={chooseArchive}><Icon name="folder-open"/> Ouvrir une archive</button></div>}
           {archive&&<>
             <div className="pathbar"><Icon name="folder"/><button className="pathpart" onClick={()=>{setFolder('');setSelected([]);}}>{archive.name}</button>{folderTrail.map((part,i)=><React.Fragment key={i}><span>/</span><button className="pathpart" onClick={()=>{setFolder(folderTrail.slice(0,i+1).join('/'));setSelected([]);}}>{part}</button></React.Fragment>)}<span className="pill">{archive.format}</span></div>
-            <div className="list-actions"><button className="toolbtn" onClick={openExtraction}><Icon name="package-open"/> Extraire</button><button className="toolbtn" disabled={!entries.length} onClick={toggleSelectAll} title="Sélectionner tous les éléments affichés dans ce dossier" aria-label={allVisibleSelected?"Tout désélectionner":"Tout sélectionner"}><Icon name="check"/> {allVisibleSelected?"Tout désélectionner":"Tout sélectionner"}</button><div className="search"><Icon name="search"/><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Rechercher dans ce dossier…" aria-label="Rechercher dans ce dossier"/></div></div>
+            <div className="list-actions"><button className="toolbtn" onClick={openExtraction}><Icon name="package-open"/> Extraire</button><button className="toolbtn" disabled={!selected.length||!archive||!/\.(zip|7z)$/i.test(archive.path)} title="Supprimer les éléments sélectionnés de cette archive ZIP ou 7z" onClick={()=>setDeleteOpen(true)}><Icon name="trash"/> Supprimer</button><button className="toolbtn" disabled={!entries.length} onClick={toggleSelectAll} title="Sélectionner tous les éléments affichés dans ce dossier" aria-label={allVisibleSelected?"Tout désélectionner":"Tout sélectionner"}><Icon name="check"/> {allVisibleSelected?"Tout désélectionner":"Tout sélectionner"}</button><div className="search"><Icon name="search"/><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Rechercher dans ce dossier…" aria-label="Rechercher dans ce dossier"/></div></div>
             <section className="listpanel"><div className="list-head"><span>Nom</span><span>Type</span><span>Taille</span><span>Compressé</span><span>Modifié le</span></div>
               {folder&&<div className="file-line" tabIndex={0} role="button" onClick={()=>{setFolder(folder.split('/').slice(0,-1).join('/'));setSelected([]);}} onKeyDown={e=>{if(e.key==='Enter'){setFolder(folder.split('/').slice(0,-1).join('/'));setSelected([]);}}}><b><Icon name="folder"/><span className="name">..</span></b><span>Dossier parent</span><span>—</span><span>—</span><span>—</span></div>}
               {entries.map(f=><div key={f.path} tabIndex={0} role="button" aria-label={`${f.isDir?'Ouvrir le dossier':'Sélectionner le fichier'} ${f.path}`} className={'file-line'+(selected.includes(f.path)?' selected':'')+' file-export'} onPointerDown={e=>armExport(e,f.path)} onPointerMove={moveExport} onPointerUp={()=>{outDragArmed.current=null;}} onPointerCancel={()=>{outDragArmed.current=null;}} onClick={()=>toggleSelected(f.path)} onDoubleClick={()=>{if(f.isDir){setFolder(f.path);setSelected([]);setSearch('');}}} onKeyDown={e=>{if(e.key==='Enter'){if(f.isDir){setFolder(f.path);setSearch('');setSelected([]);}else toggleSelected(f.path);}}}>
@@ -861,6 +916,7 @@ export default function App(){
     </div>
     {shellJob&&<div className="extract-overlay"><section className="extract-modal" role="dialog" aria-modal="true" aria-label="Opération Windows en cours"><div className="extract-header"><Icon name="archive"/><h2>{shellJob.kind==='compression'?'Compression automatique':'Extraction automatique'}</h2></div><div className="extract-progress" role="status"><div className="extract-progress-caption"><span>{shellJob.message}</span><strong>{shellJob.percent}%</strong></div><div className="extract-track"><div style={{width:`${shellJob.percent}%`}}/></div></div><div className="extract-footer"><button className="toolbtn" disabled={shellJob.cancelAsked} onClick={cancelShellJob}>{shellJob.cancelAsked?'Annulation demandée…':'Annuler'}</button></div></section></div>}
     {createOpen&&<CreationDialog initialSources={shellCreate?.sources||[]} initialFormat={shellCreate?.format||'7z'} initialError={shellCreate?.error||''} onClose={()=>{setCreateOpen(false);setShellCreate(null);}} onCreated={(r,openNow=false)=>{if(openNow)loadArchive(r.path);else notify('Archive créée et vérifiée.');}}/>}
+    {deleteOpen&&archive&&<DeleteDialog archive={archive} selected={[...selected]} defaultPassword={archivePassword} onClose={()=>setDeleteOpen(false)} onDeleted={async(_r,pass)=>{await loadArchive(archive.path,pass);notify('Éléments supprimés. Archive vérifiée.');}}/>}
     {addOpen&&archive&&<AddDialog initialSources={droppedSources} archive={archive} defaultPassword={archivePassword} onClose={()=>{setAddOpen(false);setDroppedSources([]);}} onAdded={(_r,pass)=>{loadArchive(archive.path,pass);notify('Archive mise à jour et vérifiée.');}}/>}
     {convertOpen&&<ConversionDialog archive={archive} defaultPassword={archivePassword} onClose={()=>setConvertOpen(false)} onConverted={()=>notify('Archive convertie et vérifiée. Original conservé.')}/>}
     {extractOpen&&archive&&<ExtractionDialog key={archive.path+'|'+(extractLaunch?.destination||'')} archive={archive} selected={selected} initialDestination={extractLaunch?.destination} autoStart={!!extractLaunch?.autoStart} initialPreview={extractLaunch?.preview||null} initialError={extractLaunch?.error||''} defaultPassword={archivePassword} onClose={()=>{setExtractOpen(false);setExtractLaunch(null);}} onFinished={r=>notify(`${r.extracted} fichier(s) extrait(s).`)}/>}

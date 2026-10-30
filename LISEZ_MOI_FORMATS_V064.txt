@@ -1,0 +1,49 @@
+GEKKO ARCHIVE — V0.6.4 Alpha — formats supplémentaires
+
+BASE : appliquer sur la V0.6.3 Alpha validée sous Windows 11.
+Aucune opération GitHub ou Notion n'est effectuée par ce correctif.
+
+Nouveaux choix de création : ZIP, 7z, TAR, TAR.GZ, TAR.XZ, TAR.BZ2.
+Nouvelle lecture/extraction affichée : ZIP, 7z, RAR, TAR, GZIP (.gz), XZ (.xz), BZIP2 (.bz2), ZSTD (.zst), ISO (.iso), CAB (.cab).
+Les formats déjà reconnus WIM, ARJ, LZMA ne sont pas supprimés.
+
+FONCTIONNEMENT
+- ZIP et 7z : mécanismes V0.6.3 conservés, avec chiffrement facultatif.
+- TAR : regroupement sans compression.
+- TAR.GZ, TAR.XZ, TAR.BZ2 : création TAR puis compression, décompression automatique des deux couches lors de l'ouverture et de l'extraction.
+- ZSTD : lecture/décompression autonome du flux .zst grâce à la bibliothèque Rust libre zstd 0.13, intégrée au backend (aucun programme autonome supplémentaire).
+- GZIP, XZ, BZIP2, ISO et CAB : lecture/extraction via 7-Zip déjà partagé.
+- La suppression et l'ajout restent réservés à ZIP/7z. La conversion reste ZIP/7z.
+- Aucun remplacement automatique de destination ni écrasement de fichiers sans décision explicite.
+- Les formats TAR/compressés ne proposent pas de mot de passe.
+
+INSTALLATION
+1. Fermer GEKKO ARCHIVE et sa console.
+2. Décompresser ce ZIP à la racine du projet V0.6.3, avec remplacement des fichiers modifiés.
+3. Relancer LANCER_GEKKO_ARCHIVE.bat. Le backend Rust doit être recompilé.
+   La nouvelle dépendance Rust zstd se télécharge une seule fois lors du premier build si elle n'est pas déjà dans le cache Cargo.
+   L'exécution du logiciel reste complètement hors ligne.
+4. FACULTATIF : ENREGISTRER_ASSOCIATIONS_WINDOWS_V064.bat (confirmation requise) ajoute les extensions à l'offre « Ouvrir avec » de Windows, sans les imposer par défaut.
+   RETIRER_ASSOCIATIONS_WINDOWS_V064.bat retire ces déclarations du compte actuel.
+   Les trois extensions doubles TAR.GZ/TAR.XZ/TAR.BZ2 utilisent le dernier suffixe (.gz/.xz/.bz2) pour Windows.
+
+ESSAIS CIBLÉS
+1. Créer une archive TAR.GZ, puis l'ouvrir dans GEKKO ARCHIVE : les vrais fichiers doivent apparaître (pas seulement un TAR intermédiaire). Extraire et comparer.
+2. Refaire avec TAR.XZ et TAR.BZ2 ; créer et ouvrir aussi un TAR simple.
+3. Ouvrir et extraire EXEMPLES_TEST_FORMATS_V064/texte_exemple.txt.zst ainsi que les exemples .gz, .xz et .bz2.
+4. Tester ISO et CAB uniquement sur des exemplaires fiables et non sensibles que tu possèdes déjà.
+Il n'est pas nécessaire de retester ZIP, 7z et RAR déjà validés.
+
+LIMITES ACTUELLES
+- Exécutable Windows de distribution non finalisé ; extension du menu contextuel moderne inchangée.
+- Les gros TAR compressés utilisent un TAR temporaire et demandent de la place disque pendant la création/ouverture.
+- Échantillons de test fournis uniquement pour faciliter la validation ; pas de binaires tiers intégrés dans ce ZIP.
+
+LICENCES
+7-Zip : LGPL et exceptions/composants mentionnés par l'éditeur, voir https://www.7-zip.org/license.txt
+Rust zstd 0.13 : MIT (https://github.com/gyscos/zstd-rs) ; bibliothèque Zstandard : double licence BSD / GPLv2 (https://github.com/facebook/zstd).
+Un installateur redistribué devra inclure les avis et textes de licence applicables.
+
+VALIDATION
+Syntaxe JSX vérifiée, JSON/TOML lus, fichiers de test contrôlés.
+Compilation native Windows et résultats fonctionnels à confirmer par les tests sur ton PC.

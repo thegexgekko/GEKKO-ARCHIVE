@@ -1,0 +1,13 @@
+GEKKO ARCHIVE — correctif V0.6.3 Alpha (suppression d’éléments)
+
+Fichiers modifiés : src/App.jsx, src/style.css, src-tauri/src/lib.rs, package.json, src-tauri/Cargo.toml, src-tauri/tauri.conf.json.
+Décompresser à la racine du projet V0.6.2 puis lancer LANCER_GEKKO_ARCHIVE.bat (recompilation Rust nécessaire).
+
+Dans Explorer une archive : sélectionner un ou plusieurs fichiers/dossiers (ZIP et 7z uniquement), puis cliquer sur Supprimer.
+La confirmation rappelle le contenu sélectionné. Après confirmation, une copie est modifiée avec 7-Zip, testée et comparée à la liste attendue avant remplacement.
+Annulation possible pendant la préparation, la suppression et la vérification.
+RAR et autres formats non modifiables.
+
+Essai recommandé : COPIE d’une petite archive ZIP, supprimer un fichier puis vérifier qu’il ne figure plus dans l’archive et que les autres éléments sont présents. Refaire ensuite dans une archive 7z. Un dossier sélectionné inclut ses descendants.
+
+Correctif non testé sous Windows dans cet environnement. Aucune mise à jour GitHub ou Notion.
