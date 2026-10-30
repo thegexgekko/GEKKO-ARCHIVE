@@ -2,7 +2,14 @@
 
 Utilitaire d'archives pour **Windows 11**, développé avec **React + Tauri 2 + Rust**. Projet indépendant de GEKKO ULTIMATE STUDIO.
 
-## État — V0.6.0 Alpha
+## État — V0.6.2 Alpha
+
+- **V0.6.2 validée sur Windows 11 :** icône GEKKO ARCHIVE avec G bleu et gecko doré, prise en charge du double-clic sur ZIP/7z/RAR/TAR et restauration du fond personnalisé après redémarrage.
+- Les associations de fichiers sont **facultatives** et enregistrées pour le compte Windows actif, sans remplacer automatiquement les applications par défaut.
+- Le fond et les réglages d'apparence sont conservés localement (IndexedDB et préférences du WebView).
+- Le double-clic est confirmé dans le contexte de développement testé. Le lancement autonome avec l'application fermée reste à valider avec le futur exécutable de distribution.
+- Le menu contextuel Windows 11 V0.6.1 ainsi que les moteurs d'archives demeurent inchangés.
+
 
 - Ouverture et exploration d'archives ZIP, 7z, RAR et TAR : testées sur Windows 11.
 - Extraction réelle : extraction RAR d'un fichier EXE confirmée après le correctif V0.2.4.

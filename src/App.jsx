@@ -21,6 +21,41 @@ const actions = [
   {id:'extract',text:'Extraire une archive',icon:'package-open'},
   {id:'convert',text:'Convertir une archive',icon:'repeat'}
 ];
+// Les preferences d'interface sont propres a GEKKO ARCHIVE et persistent entre deux lancements.
+const APPEARANCE_KEY='gekko.archive.appearance.v1';
+function appearanceSetting(key,fallback){
+  try {const v=JSON.parse(localStorage.getItem(APPEARANCE_KEY)||'{}');return v[key]??fallback;}
+  catch {return fallback;}
+}
+const BACKGROUND_DATABASE='gekko.archive.background.v1';
+function backgroundDatabase(){
+  return new Promise((resolve,reject)=>{
+    const request=indexedDB.open(BACKGROUND_DATABASE,1);
+    request.onupgradeneeded=()=>request.result.createObjectStore('images');
+    request.onsuccess=()=>resolve(request.result);
+    request.onerror=()=>reject(request.error||new Error('Stockage du fond inaccessible.'));
+  });
+}
+async function backgroundImageRead(){
+  const db=await backgroundDatabase();
+  try {return await new Promise((resolve,reject)=>{
+    const tx=db.transaction('images','readonly');
+    const req=tx.objectStore('images').get('active');
+    req.onsuccess=()=>resolve(req.result||null);
+    req.onerror=()=>reject(req.error||new Error('Lecture du fond impossible.'));
+  });} finally {db.close();}
+}
+async function backgroundImageSave(image){
+  const db=await backgroundDatabase();
+  try {await new Promise((resolve,reject)=>{
+    const tx=db.transaction('images','readwrite');
+    tx.objectStore('images').put(image,'active');
+    tx.oncomplete=resolve;
+    tx.onabort=()=>reject(tx.error||new Error('Ecriture interrompue.'));
+    tx.onerror=()=>reject(tx.error||new Error('Sauvegarde impossible.'));
+  });} finally {db.close();}
+}
+
 const menuLabels = [
   ['zip','Compresser en ZIP'], ['7z','Compresser en 7z'],
   ['extractHere','Extraire ici'], ['extractFolder','Extraire dans un dossier…'],
@@ -65,7 +100,7 @@ function childrenOf(files, current) {
 function AppButton({action,primary=false,onClick}) {
   return <button className={`toolbtn${primary?' primary':''}`} onClick={onClick}><Icon name={action.icon}/>{action.text}</button>;
 }
-function Settings({bg,setBg,alpha,setAlpha,info,setInfo,menuOps,setMenuOps,setImage,menuReady,menuStatus}) {
+function Settings({bg,setBg,alpha,setAlpha,info,setInfo,menuOps,setMenuOps,setImage,menuReady,menuStatus,backgroundStatus}) {
   const fileInput=useRef(null);
   return <div className="page-inner">
     <div className="crumbs">Accueil / <strong>Paramètres</strong></div>
@@ -76,6 +111,7 @@ function Settings({bg,setBg,alpha,setAlpha,info,setInfo,menuOps,setMenuOps,setIm
       <div className="setting-row"><div><label htmlFor="alphaSelector">Opacité</label><small>Rendu visuel de l'interface</small></div><select id="alphaSelector" value={alpha} onChange={e=>setAlpha(e.target.value)}><option value="0.56">Très transparent</option><option value="0.82">Transparent</option><option value="0.97">Opaque</option></select></div>
       <div className="setting-row"><div><label>Fond personnalisé</label><small>Aperçu d'une image locale</small></div><button className="toolbtn" onClick={()=>fileInput.current?.click()}><Icon name="folder-open"/> Parcourir…</button>
         <input ref={fileInput} className="hidden" type="file" accept="image/*" onChange={e=>{if(e.target.files?.[0])setImage(e.target.files[0]);e.target.value='';}}/></div>
+      {backgroundStatus&&<p role="status" aria-live="polite">{backgroundStatus}</p>}
       <div className="setting-row"><div><label htmlFor="infoToggle">Panneau d'informations</label><small>Affiché sous le contenu d'une archive</small></div><input id="infoToggle" type="checkbox" checked={info} onChange={e=>setInfo(e.target.checked)}/></div>
     </section>
     <section className="setting-section"><h2>Menu contextuel Windows 11</h2><p>Choisis les commandes qui apparaissent au clic droit dans l’Explorateur Windows. Les changements sont enregistrés localement et pris en compte à l’ouverture du menu.</p>
@@ -410,9 +446,9 @@ export default function App(){
   const [busy,setBusy]=useState(false);
   const [error,setError]=useState('');
   const [toast,setToast]=useState('');
-  const [bg,setBg]=useState('default');
-  const [alpha,setAlpha]=useState('0.82');
-  const [info,setInfo]=useState(true);
+  const [bg,setBg]=useState(()=>appearanceSetting('bg','default'));
+  const [alpha,setAlpha]=useState(()=>appearanceSetting('alpha','0.82'));
+  const [info,setInfo]=useState(()=>appearanceSetting('info',true));
   const [menuOps,setMenuOps]=useState(()=>{
     const defaults=['zip','7z','extractHere','extractFolder','open'];
     try {
@@ -452,6 +488,22 @@ export default function App(){
     return ()=>clearTimeout(timer);
   },[menuOps,menuReady]);
   const [customBg,setCustomBg]=useState('');
+  const [backgroundStatus,setBackgroundStatus]=useState('');
+  // La precedente URL.createObjectURL n'etait valable que pour la session.
+  // IndexedDB conserve les octets de l'image, meme apres fermeture du logiciel.
+  useEffect(()=>{
+    let live=true;
+    backgroundImageRead().then(image=>{
+      if(!live)return;
+      if(image instanceof Blob&&image.size>0)setCustomBg(URL.createObjectURL(image));
+      else if(bg==='custom')setBackgroundStatus('Ancienne image introuvable : choisis-la de nouveau.');
+    }).catch(err=>{if(live)setBackgroundStatus('Chargement du fond impossible : '+String(err));});
+    return ()=>{live=false;};
+  },[]);
+  useEffect(()=>{
+    try{localStorage.setItem(APPEARANCE_KEY,JSON.stringify({bg,alpha,info}));}
+    catch(err){setBackgroundStatus('Enregistrement des préférences impossible : '+String(err));}
+  },[bg,alpha,info]);
   const [extractOpen,setExtractOpen]=useState(false);
   const [createOpen,setCreateOpen]=useState(false);
   const [convertOpen,setConvertOpen]=useState(false);
@@ -746,7 +798,15 @@ export default function App(){
       setAddOpen(true);
     }
   };
-  function setImage(file){setCustomBg(URL.createObjectURL(file));setBg('custom');}
+  async function setImage(file){
+    if(!file||!file.type.startsWith('image/')){setBackgroundStatus('Sélectionne une image valide.');return;}
+    try {
+      await backgroundImageSave(file);
+      setCustomBg(URL.createObjectURL(file));
+      setBg('custom');
+      setBackgroundStatus('Image sauvegardée : elle sera restaurée au prochain démarrage.');
+    }catch(err){setBackgroundStatus('Impossible de sauvegarder le fond : '+String(err));}
+  }
   const entries=useMemo(()=>archive?childrenOf(archive.files,folder).filter(f=>f.path.split('/').at(-1).toLocaleLowerCase('fr').includes(search.toLocaleLowerCase('fr'))):[],[archive,folder,search]);
   // Sélectionner les éléments visibles du dossier courant, y compris les dossiers.
   // La préparation des fichiers pour le glisser-déposer se déclenche déjà
@@ -796,7 +856,7 @@ export default function App(){
             {info&&<div className="info-panel"><div className="stat"><small>Format</small><strong>{archive.format}</strong></div><div className="stat"><small>Taille de l'archive</small><strong>{bytes(archive.bytes)}</strong></div><div className="stat"><small>Éléments</small><strong>{archive.files.length}</strong></div><div className="stat"><small>Sélection</small><strong>{selected.length} élément(s)</strong></div></div>}
           </>}
         </div>}
-        {route==='settings'&&<Settings {...{bg,setBg,alpha,setAlpha,info,setInfo,menuOps,setMenuOps,setImage,menuReady,menuStatus}}/>}
+        {route==='settings'&&<Settings {...{bg,setBg,alpha,setAlpha,info,setInfo,menuOps,setMenuOps,setImage,menuReady,menuStatus,backgroundStatus}}/>}
       </main></section>
     </div>
     {shellJob&&<div className="extract-overlay"><section className="extract-modal" role="dialog" aria-modal="true" aria-label="Opération Windows en cours"><div className="extract-header"><Icon name="archive"/><h2>{shellJob.kind==='compression'?'Compression automatique':'Extraction automatique'}</h2></div><div className="extract-progress" role="status"><div className="extract-progress-caption"><span>{shellJob.message}</span><strong>{shellJob.percent}%</strong></div><div className="extract-track"><div style={{width:`${shellJob.percent}%`}}/></div></div><div className="extract-footer"><button className="toolbtn" disabled={shellJob.cancelAsked} onClick={cancelShellJob}>{shellJob.cancelAsked?'Annulation demandée…':'Annuler'}</button></div></section></div>}

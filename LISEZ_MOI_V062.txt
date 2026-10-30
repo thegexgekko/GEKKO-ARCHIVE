@@ -1,0 +1,28 @@
+# GEKKO ARCHIVE — correctif V0.6.2 Alpha
+
+Correctif à appliquer **sur la version V0.6.1 Alpha déjà validée**.
+
+## Inclus
+- Icône Windows carrée : G bleu et gecko doré (PNG/ICO multirésolution), à partir du logo original.
+- Image de fond sauvegardée avec ses octets dans IndexedDB (stockage local du WebView) ; restaurée au démarrage.
+- Choix du thème, de la transparence et du panneau d'informations restauré également via préférences locales.
+- Prise en charge du lancement d'un fichier ZIP, 7z, RAR ou TAR transmis en argument à l'exécutable.
+- Plugin officiel Tauri single-instance : si GEKKO ARCHIVE est déjà ouvert, un double-clic utilise la fenêtre existante.
+- Inscription **facultative et non intrusive** comme application compatible ZIP/7z/RAR/TAR, sans modifier le programme par défaut actuel.
+- Déclaration fileAssociations dans Tauri pour le futur installateur NSIS.
+
+## Installation du correctif
+1. Fermer GEKKO ARCHIVE ainsi que sa console de lancement.
+2. Décompresser le ZIP dans le dossier principal GEKKO ARCHIVE en remplaçant les fichiers indiqués.
+3. Relancer `LANCER_GEKKO_ARCHIVE.bat` : le plugin single-instance est une dépendance Rust nouvelle, sa compilation initiale peut télécharger un paquet.
+4. Régler le fond via Paramètres, fermer puis relancer et vérifier qu'il est restauré.
+5. Pour choisir GEKKO ARCHIVE comme application de double-clic, exécuter `ENREGISTRER_ASSOCIATIONS_WINDOWS_V062.bat` et confirmer `ENREGISTRER`.
+6. Dans Paramètres Windows > Applications > Applications par défaut, choisir GEKKO ARCHIVE pour les extensions souhaitées. Les associations déjà attribuées à WinRAR ne changent pas automatiquement.
+
+## Points importants
+- Les commandes de compression, d'extraction, de conversion, le glisser-déposer et le menu Windows 11 V0.6.1 ne sont pas modifiés.
+- Si seul le binaire `target/debug/gekko-archive.exe` existe, ce binaire nécessite le serveur de développement Tauri/Vite : tester le double-clic **GEKKO ARCHIVE déjà ouvert**. Le démarrage autonome demandera la compilation de distribution et sera testé avec le futur installateur.
+- Les associations suivent le chemin actuel de l'exécutable compilé. Si tu déplaces le dossier, relance l'enregistrement à ce nouvel emplacement.
+- `RETIRER_ASSOCIATIONS_WINDOWS_V062.bat` retire uniquement les inscriptions facultatives créées ici. Il ne force pas la réattribution des applications par défaut.
+- Le fond personnalisé est sauvegardé dans le profil WebView de GEKKO ARCHIVE : il reste disponible entre deux démarrages sur le même compte Windows. Un effacement des données de l'application peut le supprimer.
+- La compilation et les tests réels sous Windows 11 restent à valider. Pas de GitHub ni Notion avant validation.

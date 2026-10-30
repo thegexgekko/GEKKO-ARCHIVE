@@ -1,6 +1,6 @@
 [package]
 name = "gekko-archive"
-version = "0.6.1"
+version = "0.6.2"
 description = "GEKKO ARCHIVE — utilitaire local Windows 11"
 authors = ["GEKKO SOFTWARE"]
 edition = "2021"
@@ -19,3 +19,6 @@ serde = { version = "1", features = ["derive"] }
 
 # Glisser-déposer natif sortant vers l'Explorateur Windows (MIT/Apache-2.0).
 tauri-plugin-drag = "2.1.1"
+
+# Evite une seconde fenetre lors du double-clic sur une archive deja ouverte.
+tauri-plugin-single-instance = "2"

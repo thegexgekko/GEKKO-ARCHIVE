@@ -6,7 +6,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1014,7 +1014,43 @@ fn shell_argument_launch()->Result<Option<ShellLaunch>,String>{
             return validate_shell_launch(action,paths).map(Some);
         }
     }
+    // Double-clic Windows : le fichier associe arrive comme argument unique.
+    let paths:Vec<String>=std::env::args_os().skip(1)
+        .map(|p|p.to_string_lossy().into_owned()).collect();
+    if paths.len()==1 {
+        let path=Path::new(&paths[0]);
+        let ext=path.extension().and_then(|e|e.to_str()).unwrap_or("").to_ascii_lowercase();
+        if matches!(ext.as_str(),"zip"|"7z"|"rar"|"tar") && path.is_file() {
+            return validate_shell_launch("open".to_string(),paths).map(Some);
+        }
+    }
     Ok(None)
+}
+
+// Si GEKKO ARCHIVE est deja ouvert, le plugin single-instance remet le
+// fichier a sa fenetre via la file locale du pont V0.5.0.
+#[cfg(desktop)]
+fn handle_second_instance(app:&AppHandle,args:Vec<String>){
+    let paths:Vec<String>=args.into_iter().skip(1).collect();
+    if paths.len()!=1{return;}
+    let candidate=Path::new(&paths[0]);
+    let ext=candidate.extension().and_then(|e|e.to_str()).unwrap_or("").to_ascii_lowercase();
+    if !matches!(ext.as_str(),"zip"|"7z"|"rar"|"tar") || !candidate.is_file(){return;}
+    let Ok(request)=validate_shell_launch("open".to_string(),paths) else{return};
+    let Some(appdata)=std::env::var_os("LOCALAPPDATA") else{return};
+    let queue=PathBuf::from(appdata).join("GEKKO_ARCHIVE").join("shell_bridge");
+    if fs::create_dir_all(&queue).is_err(){return;}
+    let stamp=SystemTime::now().duration_since(UNIX_EPOCH).map(|d|d.as_nanos()).unwrap_or(0);
+    let base=format!("shell-command-{:025}-{}",stamp,std::process::id());
+    let tmp=queue.join(format!("{}.tmp",base));
+    let dest=queue.join(format!("{}.txt",base));
+    let text=format!("{}\n{}\n",request.action,request.paths.join("\n"));
+    if fs::write(&tmp,text.as_bytes()).is_ok(){
+        if fs::rename(&tmp,&dest).is_err(){let _=fs::remove_file(&tmp);}
+        else if let Some(win)=app.get_webview_window("main") {
+            let _=win.unminimize();let _=win.show();let _=win.set_focus();
+        }
+    }
 }
 
 fn shell_queued_launch()->Result<Option<ShellLaunch>,String>{
@@ -1149,6 +1185,8 @@ fn set_context_menu_commands(commands:Vec<String>)->Result<(),String>{
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run(){tauri::Builder::default().plugin(tauri_plugin_dialog::init()).plugin(tauri_plugin_drag::init()).manage(DragExportState::default()).manage(ExtractState::default()).manage(CreateState::default()).manage(ConvertState::default()).manage(AddState::default())
+pub fn run(){tauri::Builder::default()
+    .plugin(tauri_plugin_single_instance::init(|app,args,_cwd|handle_second_instance(app,args)))
+    .plugin(tauri_plugin_dialog::init()).plugin(tauri_plugin_drag::init()).manage(DragExportState::default()).manage(ExtractState::default()).manage(CreateState::default()).manage(ConvertState::default()).manage(AddState::default())
     .invoke_handler(tauri::generate_handler![list_archive,preview_extraction,extract_archive,cancel_extraction,create_archive,cancel_compression,convert_archive,cancel_conversion,add_to_archive,cancel_add,prepare_drag_export,get_shell_launch,ensure_shell_extract_folder,get_context_menu_commands,set_context_menu_commands])
     .run(tauri::generate_context!()).expect("Impossible de lancer GEKKO ARCHIVE");}
